@@ -357,6 +357,7 @@ def reconcile_equity_ke(internal_file_obj, bank_file_obj):
         
         equity_ke_df_recon = equity_ke_df_processed[equity_ke_df_processed['Amount'] > 0].copy()
         equity_ke_df_recon.loc[:, 'Amount_Rounded'] = equity_ke_df_recon['Amount'].round(2)
+
         # Add Date_Match column for consistent merging
         equity_ke_df_recon.loc[:, 'Date_Match'] = equity_ke_df_recon['Date'].dt.date
 
@@ -453,7 +454,7 @@ def reconcile_equity_ke(internal_file_obj, bank_file_obj):
         
         unmatched_internal_amount_final = unmatched_internal['Amount'].sum() if not unmatched_internal.empty else 0.0
         unmatched_bank_amount_final = unmatched_bank['Amount'].sum() if not unmatched_bank.empty else 0.0
-
+        
         # --- 6. Summary of Reconciliation ---
         summary = {
             "Total Internal Records (for recon)": len(equity_hex_df_recon),
@@ -672,13 +673,13 @@ def reconcile_zamupay(internal_file_obj, bank_file_obj):
     """
     Performs comprehensive reconciliation for Zamupay (PYCS).
     Incorporates exact match, 3-day date tolerance, and split transaction aggregation.
-    Expects internal_file_obj (CSV) and bank_file_obj (CSV).
+    Expects internal_file_obj (CSV) and bank_file_obj (CSV with header=2).
     Returns matched_total, final_unmatched_internal, final_unmatched_bank dataframes,
     and a summary dictionary.
     """
     try:
         zamupay_internal_df = read_uploaded_file(internal_file_obj, header=0)
-        zamupay_bank_df = read_uploaded_file(bank_file_obj, header=0)
+        zamupay_bank_df = read_uploaded_file(bank_file_obj, header=2)  # Changed to header=2
 
         # --- Extract currency from internal_df ---
         extracted_currency = "N/A" # Default in case column is missing or empty
@@ -719,34 +720,38 @@ def reconcile_zamupay(internal_file_obj, bank_file_obj):
     zamupay_internal_df_recon.loc[:, 'Date_Match'] = zamupay_internal_df_recon['Date'].dt.date
 
 
-    # --- 2. Preprocessing for Zamupay Bank Statements ---
+    # --- 2. Preprocessing for Zamupay Bank Statements (New Format) ---
     zamupay_bank_df.columns = zamupay_bank_df.columns.astype(str).str.strip()
 
     # Essential columns check for bank statements
-    bank_required_cols = ['Tran. Date', 'Credit Amt.', 'Particulars']
+    bank_required_cols = ['Value Date', 'Amount', 'Transaction Type']
     if not all(col in zamupay_bank_df.columns for col in bank_required_cols):
         missing_cols = [col for col in bank_required_cols if col not in zamupay_bank_df.columns]
         st.error(f"Bank statement (Zamupay) is missing essential columns: {', '.join(missing_cols)}.")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}
 
+    # Filter for Credit transactions only
+    zamupay_bank_df = zamupay_bank_df[
+        zamupay_bank_df['Transaction Type'].astype(str).str.upper() == 'CREDIT'
+    ].copy()
+
     zamupay_bank_df = zamupay_bank_df.rename(columns={
-        'Tran. Date': 'Date',
-        'Credit Amt.': 'Amount',
-        'Particulars': 'Description'
+        'Value Date': 'Date',
+        'Amount': 'Amount',
+        'Reference': 'Description'
     })
+    
     zamupay_bank_df['Date'] = pd.to_datetime(zamupay_bank_df['Date'], errors='coerce')
     zamupay_bank_df = zamupay_bank_df.dropna(subset=['Date']).copy()
 
-    zamupay_bank_df['Amount'] = zamupay_bank_df['Amount'].astype(str).str.replace(',', '', regex=False).astype(float)
+    # Clean amount column - remove commas and convert to float
+    zamupay_bank_df['Amount'] = (
+        zamupay_bank_df['Amount'].astype(str)
+        .str.replace(',', '', regex=False)
+        .astype(float)
+    )
 
-    # --- Filter out records with "REVERSAL" in 'Description' ---
-    if 'Description' in zamupay_bank_df.columns:
-        zamupay_bank_df = zamupay_bank_df[
-            ~zamupay_bank_df['Description'].astype(str).str.contains('REVERSAL', case=False, na=False)
-        ].copy()
-    else:
-        st.warning("Warning: 'Description' (Particulars) column not found in bank statement. Skipping 'REVERSAL' filter.")
-
+    # Filter positive amounts
     zamupay_bank_df_recon = zamupay_bank_df[zamupay_bank_df['Amount'] > 0].copy()
     zamupay_bank_df_recon.loc[:, 'Date_Match'] = zamupay_bank_df_recon['Date'].dt.date
 
