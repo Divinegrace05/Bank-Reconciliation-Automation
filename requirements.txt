@@ -2,39 +2,18 @@ streamlit==1.33.0
 pandas==2.2.1
 numpy==1.26.4
 openpyxl==3.1.2
+protobuf==4.25.3
 
-appdirs==1.4.4
-atomicwrites==1.4.0
-CacheControl==0.14.3
+# Firebase with compatible protobuf
 firebase-admin==6.9.0
-fuzzywuzzy==0.18.0
 google-api-core==2.25.0
 google-api-python-client==2.172.0
 google-auth==2.40.3
-google-auth-httplib2==0.2.0
-google-cloud-core==2.4.3
 google-cloud-firestore==2.21.0
 google-cloud-storage==3.1.0
-google-crc32c==1.7.1
-google-resumable-media==2.7.2
-googleapis-common-protos==1.70.0
-grpcio==1.73.0
-grpcio-status==1.73.0
-h2==4.2.0
-hpack==4.1.0
-httplib2==0.22.0
-httpx==0.28.1
-hyperframe==6.1.0
-jsonpointer==2.1
-matplotlib==3.9.2
-proto-plus==1.26.1
-protobuf==6.31.1
-pyasn1-modules==0.2.8
-pyls-spyder==0.4.0
-PyQt5==5.15.10
-PyQtWebEngine==5.15.6
-rsa==4.9.1
-setuptools==75.1.0
-uritemplate==4.2.0
-wheel==0.44.0
+
+# Other dependencies
 xlrd==2.0.1
+python-dateutil==2.9.0
+pytz==2024.1
+tzlocal==5.2
