@@ -2004,6 +2004,10 @@ def reconcile_verto(internal_file_obj, bank_file_obj, recon_month=None, recon_ye
         verto_hex_df_recon['Date_Match'] = verto_hex_df_recon['Date'].dt.date
         verto_hex_df_recon['Amount_Rounded'] = verto_hex_df_recon['Amount'].round(2)
 
+        # Calculate total internal credits
+        total_internal_credits = verto_hex_df_recon['Amount'].sum()
+        total_internal_records = len(verto_hex_df_recon)
+
         # --- 3. Preprocess bank records ---
         verto_bank_df.columns = verto_bank_df.columns.str.strip()
         verto_bank_df = verto_bank_df.rename(columns={
@@ -2026,7 +2030,7 @@ def reconcile_verto(internal_file_obj, bank_file_obj, recon_month=None, recon_ye
             (verto_bank_df['Date'].dt.year == recon_year)
         ].copy()
 
-        # Clean credit amounts
+        # clean credit amounts
         verto_bank_df['Credit'] = (
             verto_bank_df['Credit'].astype(str)
             .str.replace('[^\d.]', '', regex=True)  # Remove all non-numeric
@@ -2053,6 +2057,10 @@ def reconcile_verto(internal_file_obj, bank_file_obj, recon_month=None, recon_ye
                 st.write(verto_bank_df_recon.head())
                 st.write(f"Total: {len(verto_bank_df_recon)} records, {verto_bank_df_recon['Amount'].sum():,.2f} NGN")
         
+        # Calculate total bank credits
+        total_bank_credits = verto_bank_df_recon['Amount'].sum()
+        total_bank_records = len(verto_bank_df_recon)
+
         # --- 2. Initial Exact Matching ---
         reconciled_df = pd.merge(
             verto_hex_df_recon.assign(Source_Internal='Internal'),
@@ -2243,6 +2251,10 @@ def reconcile_fincra(internal_file_obj, bank_file_obj, recon_month=None, recon_y
         fincra_hex_df_recon['Date_Match'] = fincra_hex_df_recon['Date'].dt.date
         fincra_hex_df_recon['Amount_Rounded'] = fincra_hex_df_recon['Amount'].round(2)
 
+        # Calculate total internal credits
+        total_internal_credits = fincra_hex_df_recon['Amount'].sum()
+        total_internal_records = len(fincra_hex_df_recon)
+
         # --- 3. Preprocessing for bank_df (Bank Statements - Fincra Specific) ---
         fincra_bank_df.columns = fincra_bank_df.columns.str.strip()
         fincra_bank_df = fincra_bank_df.rename(columns={
@@ -2281,6 +2293,10 @@ def reconcile_fincra(internal_file_obj, bank_file_obj, recon_month=None, recon_y
         fincra_bank_df_recon = fincra_bank_df[['Date', 'Amount', 'Transaction_ID']].copy()
         fincra_bank_df_recon['Date_Match'] = fincra_bank_df_recon['Date'].dt.date
         fincra_bank_df_recon['Amount_Rounded'] = fincra_bank_df_recon['Amount'].round(2)
+
+        # Calculate total bank credits
+        total_bank_credits = fincra_bank_df_recon['Amount'].sum()
+        total_bank_records = len(fincra_bank_df_recon)
 
         # --- Month/Year Filter ---
         if recon_month is None:
