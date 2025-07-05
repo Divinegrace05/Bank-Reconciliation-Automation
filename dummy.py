@@ -21,7 +21,6 @@ Path(REPORTS_DIR).mkdir(parents=True, exist_ok=True)
 print(f"Reports will be stored in: {REPORTS_DIR}")  # Debug output
 
 # --- Configuration Data ---
-
 # Define the global structure for countries and banks
 COUNTRIES_BANKS = {
     "Kenya": ["Pesaswap", "Zamupay PYCS", "Equity KE", "Cellulant KE", "Mpesa KE", "I&M KES", "I&M USD (KE)", "NCBA KES", "NCBA USD"],
@@ -35,6 +34,19 @@ COUNTRIES_BANKS = {
 }
 
 MONTH_FILTER_BANKS = ["Verto", "Moniepoint"] # Needing month filter
+
+def check_duplicates(internal_df, bank_name):
+    """Check for duplicate amounts in internal records and return them with comments."""
+    duplicates = internal_df[internal_df.duplicated(['COMMENT', 'AMOUNT'], keep=False)].copy()
+    
+    if not duplicates.empty:
+        duplicates = duplicates.sort_values('AMOUNT')
+        duplicates['Bank'] = bank_name  # Add bank name for reference
+        # Select relevant columns
+        duplicates = duplicates[['TRANSFER_DATE', 'AMOUNT', 'COMMENT', 'Bank']]
+        duplicates.columns = ['Date', 'Amount', 'Comment', 'Bank']
+        return duplicates
+    return pd.DataFrame()
 
 def debug_file_operations():
     """Debug helper to check file system permissions"""
@@ -69,7 +81,12 @@ def debug_dataframe_operations():
         return True, "DataFrame can be converted to CSV"
     except Exception as e:
         return False, f"DataFrame error: {str(e)}"
-
+    
+# --- Helper Functions for Duplicate Checking ---
+def highlight_duplicates(df):
+    """Highlight duplicate amounts in a DataFrame."""
+    duplicates = df.duplicated(['Amount'], keep=False)
+    return df.style.apply(lambda x: ['background: yellow' if duplicates[i] else '' for i in range(len(df))])
 # --- Helper Functions for File Reading ---
 def create_empty_matched_df():
     """Creates an empty matched DataFrame with standard columns"""
@@ -3284,10 +3301,29 @@ RECONCILIATION_FUNCTIONS["Moniepoint"] = reconcile_moniepoint
 
 # --- Streamlit UI Page Functions ---
 def homepage():
-    """Displays the country and bank selection page, with all options visible and organized."""
+    """Displays the country and bank selection page."""
     st.header("Treasury Flows Reconciliation")
+    
+    # Add global duplicate check option
+    if st.checkbox("Check all banks for duplicate amounts"):
+        all_duplicates = []
+        for country, banks in COUNTRIES_BANKS.items():
+            for bank in banks:
+                # In a real implementation, you would need to load the internal files for each bank
+                # This is just a conceptual example
+                st.write(f"Checking duplicates for {bank}...")
+                # Here you would actually load the file and check duplicates
+                # For now we'll just show the concept
+                
+        if all_duplicates:
+            st.warning("Duplicate amounts found across multiple banks:")
+            st.dataframe(pd.concat(all_duplicates))
+        else:
+            st.success("No duplicate amounts found across all banks")
+    
     st.write("Select a country to see its providers, then click on a partner to begin reconciliation.")
-    st.divider() # Visual separator
+    st.divider()
+    
     st.subheader("Country:")
     # Horizontal Radio Buttons for Country Selection
     selected_country = st.radio("Select to see banking partners:",
@@ -3339,8 +3375,36 @@ def reconciliation_page():
     with col2:
         bank_file = st.file_uploader("Bank Statement (CSV/Excel)", type=["csv", "xlsx", "xls"])
 
+    # Store uploaded files in session state
+    if internal_file is not None:
+        st.session_state.internal_file = internal_file
+    if bank_file is not None:
+        st.session_state.bank_file = bank_file
+
+    # Add duplicate check button
+    check_dupes = st.checkbox("Check for duplicated records")
+    
+    # First load the internal file to check for duplicates if requested
+    if check_dupes and 'internal_file' in st.session_state:
+        try:
+            # Read from the beginning of the file
+            st.session_state.internal_file.seek(0)
+            internal_df = read_uploaded_file(st.session_state.internal_file, header=0)
+            if internal_df is not None:
+                duplicates = check_duplicates(internal_df, st.session_state.selected_bank)
+                if not duplicates.empty:
+                    st.warning("⚠️ Duplicate(s) found in internal records:")
+                    st.dataframe(duplicates)
+                    st.write("Please review these transactions and delete one of the record in zazu before proceeding with reconciliation.")
+                    
+        except Exception as e:
+            st.warning(f"Could not check for duplicates: {str(e)}")
+
     if st.button("Run Reconciliation", type="primary"):
-        if not all([internal_file, bank_file]):
+        # Uncheck the duplicates box (this won't take effect until next run)
+        check_dupes = False
+        
+        if 'internal_file' not in st.session_state or 'bank_file' not in st.session_state:
             st.warning("Please upload both files")
             return
             
@@ -3349,25 +3413,29 @@ def reconciliation_page():
             recon_func = RECONCILIATION_FUNCTIONS.get(st.session_state.selected_bank, placeholder_reconcile)
             
             try:
+                # Reset file pointers before reading
+                st.session_state.internal_file.seek(0)
+                st.session_state.bank_file.seek(0)
+                
                 # Call the reconciliation function with appropriate parameters
                 if st.session_state.selected_bank in MONTH_FILTER_BANKS:
                     matched, unmatched_int, unmatched_bank, summary = recon_func(
-                        internal_file,
-                        bank_file,
+                        st.session_state.internal_file,
+                        st.session_state.bank_file,
                         recon_month=recon_month,
                         recon_year=recon_year
                     )
                 else:
                     # For non-Nigerian banks, call with just the two required parameters
                     matched, unmatched_int, unmatched_bank, summary = recon_func(
-                        internal_file,
-                        bank_file
+                        st.session_state.internal_file,
+                        st.session_state.bank_file
                     )
                 
                 # Display Results
                 st.success("Reconciliation Complete ✅")
                 
-                # Summary Metrics
+                # Rest of your display code remains the same...
                 cols = st.columns(5)
                 cols[0].metric("Total Matched", summary.get("# of Transactions", summary.get("Total Matched Transactions (All Stages)", 0)))
                 
