@@ -5,4 +5,4 @@ openpyxl==3.1.2
 python-dateutil==2.9.0.post0
 pytz==2024.1
 tzlocal==5.2
-xlrd==2.0.1  # Needed for Moniepoint Excel file handling
+xlrd==2.0.1
