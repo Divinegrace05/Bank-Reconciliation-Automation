@@ -3304,23 +3304,6 @@ def homepage():
     """Displays the country and bank selection page."""
     st.header("Treasury Flows Reconciliation")
     
-    # Add global duplicate check option
-    if st.checkbox("Check all banks for duplicate amounts"):
-        all_duplicates = []
-        for country, banks in COUNTRIES_BANKS.items():
-            for bank in banks:
-                # In a real implementation, you would need to load the internal files for each bank
-                # This is just a conceptual example
-                st.write(f"Checking duplicates for {bank}...")
-                # Here you would actually load the file and check duplicates
-                # For now we'll just show the concept
-                
-        if all_duplicates:
-            st.warning("Duplicate amounts found across multiple banks:")
-            st.dataframe(pd.concat(all_duplicates))
-        else:
-            st.success("No duplicate amounts found across all banks")
-    
     st.write("Select a country to see its providers, then click on a partner to begin reconciliation.")
     st.divider()
     
