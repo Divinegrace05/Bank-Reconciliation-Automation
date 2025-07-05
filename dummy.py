@@ -1970,7 +1970,7 @@ def reconcile_verto(internal_file_obj, bank_file_obj, recon_month=None, recon_ye
         for header_row in [8, 0]:  # Try header=8 first, then header=0
             verto_bank_df = read_uploaded_file(bank_file_obj, header=header_row)
             if 'Date' in verto_bank_df.columns and 'Credit' in verto_bank_df.columns:
-                st.success(f"Bank file loaded successfully with header={header_row}")
+                #st.success(f"Bank file loaded successfully with header={header_row}")
                 break
         else:
             st.error("Could not find required columns ('Date', 'Credit') in bank file")
