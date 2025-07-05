@@ -484,7 +484,8 @@ def reconcile_equity_ke(internal_file_obj, bank_file_obj):
             "Unmatched Bank Records (Final)": len(unmatched_bank),
             "Unmatched Internal Amount (Final)": unmatched_internal_amount_final,
             "Unmatched Bank Amount (Final)": unmatched_bank_amount_final,
-            "Currency": extracted_currency
+            "Currency": extracted_currency,
+            "% accuracy": f"{(total_bank_credits / total_internal_credits * 100):.2f}%" if total_internal_credits != 0 else "N/A"
         }
 
     except Exception as e:
@@ -680,7 +681,8 @@ def reconcile_cellulant_ke(internal_file_obj, bank_file_obj):
         "Unmatched Bank Records (Final)": len(final_unmatched_bank),
         "Unmatched Internal Amount (Final)": remaining_unmatched_internal_amount,
         "Unmatched Bank Amount (Final)": remaining_unmatched_bank_amount,
-        "Currency": extracted_currency
+        "Currency": extracted_currency,
+        "% accuracy": f"{(total_bank_credits / total_internal_credits * 100):.2f}%" if total_internal_credits != 0 else "N/A"
     }
 
     # --- 7. Return the results ---
@@ -946,7 +948,8 @@ def reconcile_zamupay(internal_file_obj, bank_file_obj):
         "Unmatched Bank Records (Final)": len(final_unmatched_zamupay_bank),
         "Unmatched Internal Amount (Final)": remaining_unmatched_internal_amount,
         "Unmatched Bank Amount (Final)": remaining_unmatched_bank_amount,
-        "Currency": extracted_currency
+        "Currency": extracted_currency,
+        "% accuracy": f"{(total_bank_credits / total_internal_credits * 100):.2f}%" if total_internal_credits != 0 else "N/A"
     }
     # Return the aggregated matched dataframe, final unmatched dataframes, and the summary
     return matched_total, final_unmatched_zamupay_internal, final_unmatched_zamupay_bank, summary
@@ -1123,7 +1126,8 @@ def reconcile_selcom_tz(internal_file_obj, bank_file_obj):
         "Unmatched Bank Records (Final)": len(final_unmatched_bank),
         "Unmatched Internal Amount (Final)": remaining_unmatched_internal_amount,
         "Unmatched Bank Amount (Final)": remaining_unmatched_bank_amount,
-        "Currency": extracted_currency
+        "Currency": extracted_currency,
+        "% accuracy": f"{(total_bank_credits / total_internal_credits * 100):.2f}%" if total_internal_credits != 0 else "N/A"
     }
     # --- 8. Return the results ---
     return matched_total, final_unmatched_internal, final_unmatched_bank, summary
@@ -1218,11 +1222,9 @@ def reconcile_equity_tz(internal_file_obj, bank_file_obj):
     total_bank_credits = equity_tz_bank_df_recon['Amount'].sum()
     discrepancy_amount = total_internal_credits - total_bank_credits
 
-
     # Add Amount_Rounded to the recon DFs for matching
     equity_tz_hex_df_recon['Amount_Rounded'] = equity_tz_hex_df_recon['Amount'].round(2)
     equity_tz_bank_df_recon['Amount_Rounded'] = equity_tz_bank_df_recon['Amount'].round(2)
-
 
     # --- 5. Initial Reconciliation (transaction-level: exact date & amount) ---
     reconciled_equity_tz_df = pd.merge(
@@ -1284,9 +1286,6 @@ def reconcile_equity_tz(internal_file_obj, bank_file_obj):
     else:
         matched_total = matched_initial
 
-    # --- Stage 2: Daily Grouping and Amount Matching (To be implemented later) ---
-    # As discussed, we'll implement this stage after date tolerance is verified.
-
     # --- 6. Summary of Reconciliation ---
     total_matched_amount_internal = matched_total['Amount_Internal'].sum() if 'Amount_Internal' in matched_total.columns else 0
     total_matched_amount_bank = matched_total['Amount_Bank'].sum() if 'Amount_Bank' in matched_total.columns else 0
@@ -1306,7 +1305,8 @@ def reconcile_equity_tz(internal_file_obj, bank_file_obj):
         "Unmatched Bank Records (Final)": len(final_unmatched_bank),
         "Unmatched Internal Amount (Final)": remaining_unmatched_internal_amount,
         "Unmatched Bank Amount (Final)": remaining_unmatched_bank_amount,
-        "Currency": extracted_currency
+        "Currency": extracted_currency,
+        "% accuracy": f"{(total_bank_credits / total_internal_credits * 100):.2f}%" if total_internal_credits != 0 else "N/A"
     }
    
     # --- 7. Return the results ---
@@ -1494,7 +1494,8 @@ def reconcile_cellulant_tz(internal_file_obj, bank_file_obj):
         "Unmatched Bank Records (Final)": len(final_unmatched_bank),
         "Unmatched Internal Amount (Final)": remaining_unmatched_internal_amount,
         "Unmatched Bank Amount (Final)": remaining_unmatched_bank_amount,
-        "Currency": extracted_currency
+        "Currency": extracted_currency,
+        "% accuracy": f"{(total_bank_credits_original / total_internal_credits_original * 100):.2f}%" if total_internal_credits_original != 0 else "N/A"
     }
 
     # --- 7. Return the results ---
@@ -1734,7 +1735,8 @@ def reconcile_flutterwave_ug(internal_file_obj, bank_file_obj):
         "Unmatched Bank Records (Final)": len(final_unmatched_bank),
         "Unmatched Internal Amount (Final)": remaining_unmatched_internal_amount,
         "Unmatched Bank Amount (Final)": remaining_unmatched_bank_amount,
-        "Currency": extracted_currency
+        "Currency": extracted_currency,
+        "% accuracy": f"{(total_bank_credits_original / total_internal_credits_original * 100):.2f}%" if total_internal_credits_original != 0 else "N/A"
     }
 
     # --- 10. Return the results ---
@@ -1940,7 +1942,8 @@ def reconcile_cellulant_ngn(internal_file_obj, bank_file_obj):
         "Unmatched Bank Records (Final)": len(remaining_bank_after_tolerance),
         "Unmatched Internal Amount (Final)": remaining_unmatched_internal_amount,
         "Unmatched Bank Amount (Final)": remaining_unmatched_bank_amount,
-        "Currency": extracted_currency
+        "Currency": extracted_currency,
+        "% accuracy": f"{(total_bank_credits / total_internal_credits * 100):.2f}%" if total_internal_credits != 0 else "N/A"
     }
 
     # --- 8. Return the results ---
@@ -2163,7 +2166,6 @@ def reconcile_verto(internal_file_obj, bank_file_obj, recon_month=None, recon_ye
         final_unmatched_internal['Date'] = pd.to_datetime(final_unmatched_internal['Date'])
         final_unmatched_bank['Date'] = pd.to_datetime(final_unmatched_bank['Date'])
 
-
         # --- 7. Generate Summary ---
         total_matched = len(matched_final)
         total_internal = len(verto_hex_df_recon)
@@ -2177,7 +2179,7 @@ def reconcile_verto(internal_file_obj, bank_file_obj, recon_month=None, recon_ye
             "Partner Statement": verto_bank_df_recon['Amount'].sum(),
             "Treasury Records": verto_hex_df_recon['Amount'].sum(),
             "Variance": verto_hex_df_recon['Amount'].sum() - verto_bank_df_recon['Amount'].sum(),
-            "% accuracy": f"{accuracy:.2f}%",
+            "% accuracy": f"{(total_bank_credits / total_internal_credits * 100):.2f}%" if total_internal_credits != 0 else "N/A",
             "Status": "Matched" if final_unmatched_internal.empty and final_unmatched_bank.empty else "Partial",
             "Timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "Comments": "",
@@ -2402,7 +2404,7 @@ def reconcile_fincra(internal_file_obj, bank_file_obj, recon_month=None, recon_y
             "Partner Statement": fincra_bank_df_recon['Amount'].sum(),
             "Treasury Records": fincra_hex_df_recon['Amount'].sum(),
             "Variance": fincra_hex_df_recon['Amount'].sum() - fincra_bank_df_recon['Amount'].sum(),
-            "% accuracy": f"{accuracy:.2f}%",
+            "% accuracy": f"{(total_bank_credits / total_internal_credits * 100):.2f}%" if total_internal_credits != 0 else "N/A",
             "Status": "Matched" if final_unmatched_internal.empty and final_unmatched_bank.empty else "Partial",
             "Timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "Comments": "",
@@ -2411,7 +2413,6 @@ def reconcile_fincra(internal_file_obj, bank_file_obj, recon_month=None, recon_y
                 "Tolerance Matches": len(matched_tolerance_df)
             }
         }
-
         return matched_final, final_unmatched_internal, final_unmatched_bank, summary
 
     except Exception as e:
@@ -2667,7 +2668,8 @@ def reconcile_zenith(internal_file_obj: BytesIO, bank_file_obj: BytesIO):
             "Unmatched Bank Records (Final)": len(final_unmatched_bank),
             "Unmatched Internal Amount (Final)": remaining_unmatched_internal_amount,
             "Unmatched Bank Amount (Final)": remaining_unmatched_bank_amount,
-            "Currency": extracted_currency
+            "Currency": extracted_currency,
+            "% accuracy": f"{(total_bank_credits / total_internal_credits * 100):.2f}%" if total_internal_credits != 0 else "N/A"
         }
 
     except Exception as e:
@@ -2915,7 +2917,7 @@ def reconcile_flutterwave_ngn(internal_file_obj, bank_file_obj):
             "Partner Statement": total_bank_credits,
             "Treasury Records": total_internal_credits,
             "Variance": updated_variance,
-            "% accuracy": f"{accuracy:.2f}%",
+            "% accuracy": f"{(total_bank_credits / total_internal_credits * 100):.2f}%" if total_internal_credits != 0 else "N/A",
             "Status": status,
             "Timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "Comments": "",
@@ -3129,7 +3131,8 @@ def reconcile_moniepoint(internal_file_obj, bank_file_obj, recon_month=None, rec
             "Unmatched Bank Records (Final)": len(final_unmatched_bank),
             "Unmatched Internal Amount (Final)": final_unmatched_internal['Amount'].sum(),
             "Unmatched Bank Amount (Final)": final_unmatched_bank['Amount'].sum(),
-            "Currency": "NGN"
+            "Currency": "NGN",
+            "% accuracy": f"{(total_bank_credits / total_internal_credits * 100):.2f}%" if total_internal_credits != 0 else "N/A"
         }
         return matched_total, final_unmatched_internal, final_unmatched_bank, summary
 
@@ -3230,27 +3233,27 @@ def generate_excel_summary_row(summary_dict, provider_name, selected_country, re
         "Timestamp", "Comments"
     ]
     
-    # Calculate values with defaults
-    currency = summary_dict.get("Currency", get_currency_for_country(selected_country))
-    total_internal = summary_dict.get("Total Internal Records (for recon)", 0)
-    total_matched = summary_dict.get("Total Matched Transactions (All Stages)", 0)
-    percentage_accuracy = (total_matched / total_internal * 100) if total_internal > 0 else 0
-    variance = summary_dict.get("Overall Discrepancy (Original)", 0)
-    status = "Matched" if abs(variance) < 0.01 else "Unmatched"
+    # Get the amounts from the summary
+    treasury_total = summary_dict.get("Treasury Records", summary_dict.get("Total Internal Credits (Original)", 0))
+    bank_total = summary_dict.get("Partner Statement", summary_dict.get("Total Bank Credits (Original)", 0))
+    
+    # Calculate the new accuracy based on amounts
+    if treasury_total != 0:
+        percentage_accuracy = (bank_total / treasury_total * 100)
+    else:
+        percentage_accuracy = 0
     
     # Create the row with all required columns
     row = {
         "Provider name": provider_name,
-        "Currency": currency,
+        "Currency": summary_dict.get("Currency", get_currency_for_country(selected_country)),
         "Month & Year": recon_month_year,
-        "# of Transactions": total_matched + 
-                           summary_dict.get("Unmatched Internal Records (Final)", 0) + 
-                           summary_dict.get("Unmatched Bank Records (Final)", 0),
-        "Partner Statement": summary_dict.get("Total Bank Credits (Original)", 0),
-        "Treasury Records": summary_dict.get("Total Internal Credits (Original)", 0),
-        "Variance": variance,
+        "# of Transactions": summary_dict.get("Total Matched Transactions (All Stages)", 0),
+        "Partner Statement": bank_total,
+        "Treasury Records": treasury_total,
+        "Variance": summary_dict.get("Overall Discrepancy (Original)", 0),
         "% accuracy": f"{percentage_accuracy:.2f}%",
-        "Status": status,
+        "Status": "Matched" if abs(bank_total - treasury_total) < 0.01 else "Unmatched",
         "Timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "Comments": ""
     }
@@ -3378,7 +3381,7 @@ def reconciliation_page():
                 if not duplicates.empty:
                     st.warning("⚠️ Duplicate(s) found in internal records:")
                     st.dataframe(duplicates)
-                    st.write("Please review these transactions and delete any duplicates in zazu before proceeding with reconciliation.")
+                    st.write("Please review these transactions and delete one of them in zazu before proceeding with reconciliation.")
                 else:
                     st.write("No duplicates found, proceed with reconciliation.")
         except Exception as e:
@@ -3423,11 +3426,11 @@ def reconciliation_page():
                 cols[0].metric("Total Matched", summary.get("# of Transactions", summary.get("Total Matched Transactions (All Stages)", 0)))
                 
                 accuracy = summary.get("% accuracy", 
-                                    f"{(summary.get('Total Matched Transactions (All Stages)', 0) / summary.get('Total Internal Records (for recon)', 1) * 100):.2f}%"
-                                    if summary.get('Total Internal Records (for recon)', 0) > 0 
-                                    else "0%")
+                      f"{(summary.get('Total Bank Credits (Original)', 0) / summary.get('Total Internal Credits (Original)', 1) * 100):.2f}%"
+                      if summary.get('Total Internal Credits (Original)', 0) > 0 
+                      else "0%")
                 cols[1].metric("Accuracy", accuracy)
-                
+
                 treasury_total = summary.get("Treasury Records", summary.get("Total Internal Credits (Original)", 0))
                 cols[2].metric("Treasury Total", f"{treasury_total:,.2f}")
                 
