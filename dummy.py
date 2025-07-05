@@ -1,11 +1,14 @@
 import os 
+import re
 import streamlit as st
 import pandas as pd
+import numpy as np
 from io import BytesIO
 import datetime
 from pathlib import Path
 from io import StringIO
 import time
+import openpyxl
 
 # --- Configuration for Reports Storage ---
 # Define the base directory in your home folder
@@ -21,15 +24,16 @@ print(f"Reports will be stored in: {REPORTS_DIR}")  # Debug output
 
 # Define the global structure for countries and banks
 COUNTRIES_BANKS = {
-    "Kenya": ["Pesaswap", "Zamupay (PYCS)", "Equity KE", "Cellulant KE", "Mpesa KE", "I&M KE(KES)", "I&M KE(USD)", "NCBA KE(KES)", "NCBA KE(USD)"],
-    "Tanzania": ["NMB", "M-pesa TZ", "Selcom TZ", "CRDB(TZS)", "CRDB(USD)", "Equity TZ", "Cellulant TZ", "I&M KE(TZS)", "I&M KE(USD)", "UBA"],
-    "Uganda": ["Pegasus", "Flutterwave Ug", "Equity Ug(UGX)", "Equity Ug(USD)"],
-    "Ghana": ["Flutterwave(GHS)", "Fincra GHS", "Zeepay"],
+    "Kenya": ["Pesaswap", "Zamupay PYCS", "Equity KE", "Cellulant KE", "Mpesa KE", "I&M KES", "I&M USD (KE)", "NCBA KES", "NCBA USD"],
+    "Tanzania": ["NMB", "M-pesa TZ", "Selcom TZ", "CRDB TZS", "CRDB USD", "Equity TZ", "Cellulant TZ", "I&M TZS", "I&M USD (TZ)", "UBA"],
+    "Uganda": ["Pegasus", "Flutterwave Ug", "Equity UGX", "Equity Ug USD"],
+    "Ghana": ["Flutterwave GHS", "Fincra GHS", "Zeepay"],
     "Senegal & Côte d'Ivoire XOF": ["Aza Finance", "Hub2 IC", "Hub2 SEN"],
-    "Rwanda": ["I&M(RWF)", "I&M(USD)", "Kremit", "Flutterwave(RWF)"],
+    "Rwanda": ["I&M RWF", "I&M USD (RWF)", "Kremit", "Flutterwave RWF"],
     "Cameroon XAF": ["Peex", "Pawapay", "Aza Finance", "Hub2"],
     "Nigeria": ["Moniepoint", "Verto", "Cellulant NGN", "Flutterwave NGN", "Fincra NGN", "Zenith"]
 }
+
 MONTH_FILTER_BANKS = ["Verto", "Moniepoint"] # Needing month filter
 
 def debug_file_operations():
@@ -889,7 +893,6 @@ def reconcile_zamupay(internal_file_obj, bank_file_obj):
 
 
     # --- 7. Final Summary of Reconciliation ---
-
     # Combine all matched dataframes for total counts and amounts
     all_matched_dfs = [matched_zamupay_transactions_exact, matched_zamupay_with_tolerance, matched_zamupay_by_aggregation]
     # Filter out empty dataframes before concatenation
@@ -905,7 +908,6 @@ def reconcile_zamupay(internal_file_obj, bank_file_obj):
 
     total_matched_amount_internal = matched_total['Amount_Internal'].sum() if 'Amount_Internal' in matched_total.columns else 0
     total_matched_amount_bank = matched_total['Amount_Bank'].sum() if 'Amount_Bank' in matched_total.columns else 0
-
     remaining_unmatched_internal_amount = final_unmatched_zamupay_internal['Amount'].sum() if 'Amount' in final_unmatched_zamupay_internal.columns else 0
     remaining_unmatched_bank_amount = final_unmatched_zamupay_bank['Amount'].sum() if 'Amount' in final_unmatched_zamupay_bank.columns else 0
 
@@ -924,7 +926,6 @@ def reconcile_zamupay(internal_file_obj, bank_file_obj):
         "Unmatched Bank Amount (Final)": remaining_unmatched_bank_amount,
         "Currency": extracted_currency
     }
-
     # Return the aggregated matched dataframe, final unmatched dataframes, and the summary
     return matched_total, final_unmatched_zamupay_internal, final_unmatched_zamupay_bank, summary
     
@@ -946,7 +947,6 @@ def reconcile_selcom_tz(internal_file_obj, bank_file_obj):
     if selcom_hex_df is None or selcom_bank_df is None:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {} # Return empty DFs and dict if files not loaded
 
-
     # --- 2. Preprocessing for selcom_hex_df (Internal Records) ---
     selcom_hex_df.columns = selcom_hex_df.columns.astype(str).str.strip()
 
@@ -956,7 +956,6 @@ def reconcile_selcom_tz(internal_file_obj, bank_file_obj):
         missing_cols = [col for col in internal_required_cols if col not in selcom_hex_df.columns]
         st.error(f"Internal records (SelcomHex) are missing essential columns: {', '.join(missing_cols)}.")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}
-
     selcom_hex_df = selcom_hex_df.rename(columns={'TRANSFER_DATE': 'Date', 'AMOUNT': 'Amount'})
 
     # Convert 'Date' to datetime objects
@@ -966,7 +965,6 @@ def reconcile_selcom_tz(internal_file_obj, bank_file_obj):
     # Ensure amount is numeric and positive
     selcom_hex_df['Amount'] = pd.to_numeric(selcom_hex_df['Amount'], errors='coerce').fillna(0)
     selcom_hex_df_recon = selcom_hex_df[selcom_hex_df['Amount'] > 0].copy()
-
     selcom_hex_df_recon.loc[:, 'Date_Match'] = selcom_hex_df_recon['Date'].dt.date
 
     # --- Extract currency from selcom_hex_df ---
@@ -1012,9 +1010,7 @@ def reconcile_selcom_tz(internal_file_obj, bank_file_obj):
 
     # Filter bank records to include only positive amounts (credits)
     selcom_bank_df_recon = selcom_bank_df[selcom_bank_df['Amount'] > 0].copy()
-
     selcom_bank_df_recon.loc[:, 'Date_Match'] = selcom_bank_df_recon['Date'].dt.date
-
 
     # --- 4. Calculate Total Amounts and Discrepancy (before reconciliation) ---
     total_internal_credits = selcom_hex_df_recon['Amount'].sum()
@@ -1025,11 +1021,9 @@ def reconcile_selcom_tz(internal_file_obj, bank_file_obj):
     if total_bank_credits == 0 and total_internal_credits > 0:
         st.warning("Warning: Total Bank Statement Credit Amount is 0.00. Please check the 'Amount' column in the bank statement file for correct data and format.")
 
-
     # --- 5. Reconciliation (Exact Match) ---
     selcom_hex_df_recon.loc[:, 'Amount_Rounded'] = selcom_hex_df_recon['Amount'].round(2)
     selcom_bank_df_recon.loc[:, 'Amount_Rounded'] = selcom_bank_df_recon['Amount'].round(2)
-
     reconciled_selcom_df_exact = pd.merge(
         selcom_hex_df_recon.assign(Source_Internal='Internal'),
         selcom_bank_df_recon.assign(Source_Bank='Bank'),
@@ -1037,7 +1031,6 @@ def reconcile_selcom_tz(internal_file_obj, bank_file_obj):
         how='outer',
         suffixes=('_Internal', '_Bank')
     )
-
     matched_exact = reconciled_selcom_df_exact.dropna(subset=['Source_Internal', 'Source_Bank']).copy()
 
     # Prepare initially unmatched internal transactions for the next stage (Date Tolerance)
@@ -1053,7 +1046,6 @@ def reconcile_selcom_tz(internal_file_obj, bank_file_obj):
         unmatched_internal_for_tolerance = pd.DataFrame(columns=['Date', 'Amount', 'Amount_Rounded', 'Source'])
         unmatched_internal_for_tolerance['Date'] = pd.to_datetime(unmatched_internal_for_tolerance['Date'])
 
-
     # Prepare initially unmatched bank transactions for the next stage (Date Tolerance)
     unmatched_bank_for_tolerance = reconciled_selcom_df_exact[reconciled_selcom_df_exact['Source_Internal'].isna()].copy()
     if not unmatched_bank_for_tolerance.empty:
@@ -1066,7 +1058,6 @@ def reconcile_selcom_tz(internal_file_obj, bank_file_obj):
     else:
         unmatched_bank_for_tolerance = pd.DataFrame(columns=['Date', 'Amount', 'Amount_Rounded', 'Source'])
         unmatched_bank_for_tolerance['Date'] = pd.to_datetime(unmatched_bank_for_tolerance['Date'])
-
 
     # --- 6. Reconciliation with Date Tolerance (3 days) using perform_date_tolerance_matching ---
     matched_with_tolerance = pd.DataFrame()
@@ -1081,14 +1072,10 @@ def reconcile_selcom_tz(internal_file_obj, bank_file_obj):
                 unmatched_bank_for_tolerance,
                 tolerance_days=3 # Allowing up to 3 days difference
             )
-
-
     # --- 7. Final Summary of Reconciliation ---
-
     # Combine all matched dataframes for total counts and amounts
     all_matched_dfs = [matched_exact, matched_with_tolerance]
     all_matched_dfs = [df for df in all_matched_dfs if not df.empty] # Filter out empty DFs
-
     if all_matched_dfs:
         matched_total = pd.concat(all_matched_dfs, ignore_index=True)
     else:
@@ -1099,11 +1086,8 @@ def reconcile_selcom_tz(internal_file_obj, bank_file_obj):
 
     total_matched_amount_internal = matched_total['Amount_Internal'].sum() if 'Amount_Internal' in matched_total.columns else 0
     total_matched_amount_bank = matched_total['Amount_Bank'].sum() if 'Amount_Bank' in matched_total.columns else 0
-
     remaining_unmatched_internal_amount = final_unmatched_internal['Amount'].sum() if 'Amount' in final_unmatched_internal.columns else 0
     remaining_unmatched_bank_amount = final_unmatched_bank['Amount'].sum() if 'Amount' in final_unmatched_bank.columns else 0
-
-
     summary = {
         "Total Internal Records (for recon)": len(selcom_hex_df_recon),
         "Total Bank Statement Records (for recon)": len(selcom_bank_df_recon),
@@ -1119,7 +1103,6 @@ def reconcile_selcom_tz(internal_file_obj, bank_file_obj):
         "Unmatched Bank Amount (Final)": remaining_unmatched_bank_amount,
         "Currency": extracted_currency
     }
-
     # --- 8. Return the results ---
     return matched_total, final_unmatched_internal, final_unmatched_bank, summary
 
@@ -1172,7 +1155,6 @@ def reconcile_equity_tz(internal_file_obj, bank_file_obj):
     else:
         extracted_currency = "N/A (CURRENCY column missing or empty)"
 
-
     # --- 3. Preprocessing for equity_tz_bank_df (Bank Statements) ---
     equity_tz_bank_df.columns = equity_tz_bank_df.columns.astype(str).str.strip()
     if 'Transaction Date' in equity_tz_bank_df.columns:
@@ -1196,9 +1178,7 @@ def reconcile_equity_tz(internal_file_obj, bank_file_obj):
 
     equity_tz_bank_df['Amount'] = equity_tz_bank_df['Credit']
     equity_tz_bank_df_recon = equity_tz_bank_df[equity_tz_bank_df['Amount'] > 0].copy()
-
     equity_tz_bank_df_recon.loc[:, 'Date_Match'] = equity_tz_bank_df_recon['Date'].dt.date
-
 
     # --- Filter bank records by 'RTGS NALA' in 'Narrative' ---
     narrative_filter = 'RTGS NALA'
@@ -1210,7 +1190,6 @@ def reconcile_equity_tz(internal_file_obj, bank_file_obj):
         equity_tz_bank_df_recon = equity_tz_bank_df_recon.drop(columns=['Narrative'], errors='ignore')
     else:
         st.warning(f"Bank statement (EquityTZ) does not have a 'Narrative' column. Skipping '{narrative_filter}' filter.")
-
 
     # --- 4. Calculate Total Amounts and Discrepancy (before reconciliation) ---
     total_internal_credits = equity_tz_hex_df_recon['Amount'].sum()
@@ -1265,7 +1244,6 @@ def reconcile_equity_tz(internal_file_obj, bank_file_obj):
         unmatched_bank_initial = pd.DataFrame(columns=['Date', 'Amount', 'Amount_Rounded', 'Source'])
         unmatched_bank_initial['Date'] = pd.to_datetime(unmatched_bank_initial['Date']) # Ensure correct dtype
 
-
     # --- Stage 1: Date Tolerance Matching ---
     matched_date_tolerance_df = pd.DataFrame()
     final_unmatched_internal = unmatched_internal_initial.copy()
@@ -1283,7 +1261,6 @@ def reconcile_equity_tz(internal_file_obj, bank_file_obj):
         matched_total = pd.concat([matched_initial, matched_date_tolerance_df], ignore_index=True)
     else:
         matched_total = matched_initial
-
 
     # --- Stage 2: Daily Grouping and Amount Matching (To be implemented later) ---
     # As discussed, we'll implement this stage after date tolerance is verified.
@@ -2934,203 +2911,250 @@ def reconcile_flutterwave_ngn(internal_file_obj, bank_file_obj):
     except Exception as e:
         st.error(f"Error during reconciliation: {str(e)}")
         return matched_transactions, unmatched_internal, unmatched_bank, summary
-    
-def reconcile_moniepoint(internal_file_obj, bank_file_obj, recon_month=None, recon_year=None):
+
+def load_moniepoint_bank_statement(file_obj):
     """
-    Performs reconciliation for MoniePoint Nigeria (NGN) with robust file handling
+    Handles MoniePoint's multi-sheet Excel files, including legacy .xls format.
+    It reads all sheets and combines them, using the header from the first sheet.
     """
     try:
-        # Initialize empty DataFrames with proper columns
-        empty_df = pd.DataFrame(columns=[
-            'Date_Internal', 'Amount_Internal', 'ID_Internal',
-            'Date_Bank', 'Amount_Bank', 'ID_Bank',
-            'Amount_Rounded', 'Date_Difference_Days', 'Sender_Name'
-        ])
-        empty_unmatched = pd.DataFrame(columns=['Date', 'Amount', 'ID', 'Amount_Rounded'])
+        # Use a seek(0) to ensure the file pointer is at the beginning
+        file_obj.seek(0)
         
-        # --- 1. Load internal records ---
+        # Use xlrd engine for broader compatibility with .xls files
+        xls = pd.ExcelFile(file_obj, engine='xlrd')
+        sheet_names = xls.sheet_names
+        
+        if not sheet_names:
+            st.warning("No sheets found in the MoniePoint bank statement.")
+            return pd.DataFrame()
+
+        # Read the first sheet to establish the columns
+        df_first_sheet = pd.read_excel(xls, sheet_name=sheet_names[0], header=0)
+        columns = df_first_sheet.columns.tolist()
+        
+        all_dfs = [df_first_sheet]
+
+        # Read the remaining sheets without headers and apply the columns from the first sheet
+        for sheet_name in sheet_names[1:]:
+            df_other_sheet = pd.read_excel(xls, sheet_name=sheet_name, header=None)
+            if df_other_sheet.shape[1] == len(columns):
+                df_other_sheet.columns = columns
+                all_dfs.append(df_other_sheet)
+            else:
+                st.warning(f"Skipping sheet '{sheet_name}' due to column count mismatch.")
+        
+        # Combine all valid sheets into a single DataFrame
+        combined_df = pd.concat(all_dfs, ignore_index=True)
+        return combined_df
+
+    except Exception as e:
+        st.error(f"Failed to load the MoniePoint bank statement. Error: {str(e)}")
+        raise
+
+def reconcile_moniepoint(internal_file_obj, bank_file_obj, recon_month=None, recon_year=None):
+    """
+    Performs reconciliation for MoniePoint Nigeria (NGN) with:
+    1. Exact matching (same date + amount)
+    2. Date tolerance matching (±3 days)
+    3. Special handling for MoniePoint's multi-sheet Excel format
+    4. Aggregation of split transactions within 30-minute windows
+    """
+    # Initialize empty DataFrames to ensure the function always returns the correct number of values
+    matched_total = create_empty_matched_df()
+    final_unmatched_internal = create_empty_unmatched_df()
+    final_unmatched_bank = create_empty_unmatched_df()
+    summary = {}
+
+    try:
+        # --- 1. Load the datasets ---
         MP_ng_hex_df = read_uploaded_file(internal_file_obj, header=0)
-        
-        # --- 2. Improved Bank Statement Loading ---
-        def load_moniepoint_bank_statement(file_obj):
-            """Handle all MoniePoint file formats including legacy Excel"""
-            try:
-                # First try reading as Excel (will work for both .xls and .xlsx)
-                try:
-                    file_obj.seek(0)
-                    sheets_dict = pd.read_excel(file_obj, sheet_name=None)
-                    
-                    # If we got a dict of sheets, combine them
-                    if isinstance(sheets_dict, dict):
-                        combined_df = pd.concat(sheets_dict.values(), ignore_index=True)
-                        st.success(f"Loaded {len(sheets_dict)} sheets successfully")
-                        return combined_df
-                    # If we got a single dataframe, return it directly
-                    return sheets_dict
-                except Exception as excel_error:
-                    # If Excel read failed, try CSV
-                    try:
-                        file_obj.seek(0)
-                        return pd.read_csv(file_obj)
-                    except Exception as csv_error:
-                        st.error(f"Could not read as Excel ({str(excel_error)}) or CSV ({str(csv_error)})")
-                        raise ValueError("File is neither valid Excel nor CSV")
-                
-            except Exception as e:
-                st.error(f"Could not read file: {str(e)}")
-                raise
-
         try:
-            # Create a copy of the file object
-            from io import BytesIO
-            bank_file_copy = BytesIO(bank_file_obj.getvalue())
-            
-            # Load the bank statement
-            MP_ng_bank_df = load_moniepoint_bank_statement(bank_file_copy)
-            
-            if MP_ng_bank_df is None or MP_ng_bank_df.empty:
-                st.error("Bank statement is empty or could not be loaded")
-                return empty_df, empty_unmatched, empty_unmatched, {}
-                
+            MP_ng_bank_df = load_moniepoint_bank_statement(bank_file_obj)
         except Exception as e:
-            st.error(f"Error loading bank statement: {str(e)}")
-            return empty_df, empty_unmatched, empty_unmatched, {}
+            st.error(f"Error loading MoniePoint bank statement: {str(e)}")
+            return matched_total, final_unmatched_internal, final_unmatched_bank, summary
 
-        # --- 3. Preprocessing for internal_df ---
+        if MP_ng_hex_df is None or MP_ng_bank_df is None or MP_ng_bank_df.empty:
+            st.error("One or both files could not be loaded for MoniePoint.")
+            return matched_total, final_unmatched_internal, final_unmatched_bank, summary
+
+        # --- 2. Preprocessing for internal_df (Internal Records) ---
         MP_ng_hex_df.columns = MP_ng_hex_df.columns.str.strip()
-        
-        # Essential columns check
+
         internal_required_cols = ['TRANSFER_DATE', 'AMOUNT']
         if not all(col in MP_ng_hex_df.columns for col in internal_required_cols):
             missing_cols = [col for col in internal_required_cols if col not in MP_ng_hex_df.columns]
-            st.error(f"Internal records missing columns: {', '.join(missing_cols)}")
-            return empty_df, empty_unmatched, empty_unmatched, {}
+            st.error(f"Internal records are missing essential columns: {', '.join(missing_cols)}")
+            return matched_total, final_unmatched_internal, final_unmatched_bank, summary
 
         MP_ng_hex_df = MP_ng_hex_df.rename(columns={
             'TRANSFER_DATE': 'Date',
             'AMOUNT': 'Amount',
+            'COMMENT': 'Description',
             'TRANSFER_ID': 'ID'
         })
 
+        # **FIX**: Gracefully handle missing optional columns
+        if 'Description' not in MP_ng_hex_df.columns:
+            MP_ng_hex_df['Description'] = ''
+        if 'ID' not in MP_ng_hex_df.columns:
+            MP_ng_hex_df['ID'] = 'Internal_' + MP_ng_hex_df.index.astype(str)
+
         MP_ng_hex_df['Date'] = pd.to_datetime(MP_ng_hex_df['Date'], errors='coerce')
         MP_ng_hex_df = MP_ng_hex_df.dropna(subset=['Date']).copy()
-        
-        # Filter positive amounts
+
+        if recon_month and recon_year:
+            MP_ng_hex_df = MP_ng_hex_df[
+                (MP_ng_hex_df['Date'].dt.month == recon_month) &
+                (MP_ng_hex_df['Date'].dt.year == recon_year)
+            ].copy()
+
         MP_ng_hex_df_recon = MP_ng_hex_df[MP_ng_hex_df['Amount'] > 0].copy()
+        MP_ng_hex_df_recon = MP_ng_hex_df_recon[['Date', 'Amount', 'Description', 'ID']].copy() # This is now safe
         MP_ng_hex_df_recon['Date_Match'] = MP_ng_hex_df_recon['Date'].dt.date
         MP_ng_hex_df_recon['Amount_Rounded'] = MP_ng_hex_df_recon['Amount'].round(2)
 
-        # --- 4. Bank Statement Processing ---
-        # First ensure required columns exist
-        bank_required_cols = ['DATE', 'AMOUNT', 'TRANSACTION_TYPE', 'NARRATION']
-        missing_bank_cols = [col for col in bank_required_cols if col not in MP_ng_bank_df.columns]
-        if missing_bank_cols:
-            st.error(f"Bank statement missing columns: {', '.join(missing_bank_cols)}")
-            return empty_df, empty_unmatched, empty_unmatched, {}
+        # --- 3. Preprocessing for bank_df (Bank Statements) ---
+        def preprocess_moniepoint_bank(df):
+            df.columns = df.columns.str.strip()
+            bank_required_cols = ['DATE', 'AMOUNT', 'TRANSACTION_TYPE', 'NARRATION', 'REFERENCE']
+            if not all(col in df.columns for col in bank_required_cols):
+                st.error(f"Bank statement is missing essential columns: {', '.join([c for c in bank_required_cols if c not in df.columns])}")
+                return pd.DataFrame()
 
-        MP_ng_bank_df['DATE'] = pd.to_datetime(MP_ng_bank_df['DATE'], errors='coerce')
-        MP_ng_bank_df = MP_ng_bank_df.dropna(subset=['DATE']).copy()
-        
-        # Apply month/year filter if provided
-        if recon_month and recon_year:
-            MP_ng_bank_df = MP_ng_bank_df[
-                (MP_ng_bank_df['DATE'].dt.month == recon_month) & 
-                (MP_ng_bank_df['DATE'].dt.year == recon_year)
+            df['DATE'] = pd.to_datetime(df['DATE'], errors='coerce')
+            df = df.dropna(subset=['DATE']).copy()
+
+            if recon_month and recon_year:
+                df = df[(df['DATE'].dt.month == recon_month) & (df['DATE'].dt.year == recon_year)].copy()
+
+            df_cleaned = df[
+                (df['TRANSACTION_TYPE'] == 'CREDIT') &
+                (df['NARRATION'].str.contains('MFY-WT', na=False)) &
+                (~df['REFERENCE'].str.contains('RVSL', na=False))
             ].copy()
 
-        # MoniePoint specific filters
-        MP_ng_bank_df = MP_ng_bank_df[
-            (MP_ng_bank_df['TRANSACTION_TYPE'] == 'CREDIT') & 
-            (MP_ng_bank_df['NARRATION'].str.contains('MFY-WT', na=False)) & 
-            (~MP_ng_bank_df['NARRATION'].str.contains('RVSL', na=False))
-        ].copy()
+            if df_cleaned.empty:
+                st.warning("No records found after applying all bank statement filters.")
+                return pd.DataFrame()
 
-        # Extract sender name from narration
-        def extract_sender_name(narration):
-            narration = str(narration).lower()
-            patterns = {
-                'verto': 'VertoFX',
-                'paga': 'Paga',
-                'duplo': 'Duplo',
-                'sendfirst': 'SendFirst',
-                'flutterwave': 'Flutterwave',
-                'nala': 'Nala Payments',
-                'esca': 'Esca Nigeria',
-                'resrv': 'Resrv FX',
-                'waza': 'Waza Nigeria',
-                'inexass': 'AZA Finance',
-                'south one': 'Southone',
-                'titan-paystack': 'Multigate',
-                'multigate': 'Multigate',
-                'zerozilo': 'Fincra',
-                'silverfile': 'Fincra',
-                'palm bills': 'Fincra',
-                'ift technologies': 'Torus Mara',
-                'budpay': 'Torus Mara',
-                'starks': 'Straitpay',
-                'shamiri': 'Straitpay'
-            }
-            for pattern, name in patterns.items():
-                if pattern in narration:
-                    return name
-            return 'Other'
+            def extract_sender_name(narration):
+                narration = str(narration).lower()
+                if 'verto financial tech' in narration or 'paga' in narration: return 'VertoFX, NGN a/c'
+                elif 'sendfirst' in narration or 'duplo ltd' in narration: return 'Duplo, NGN a/c'
+                elif 'esca' in narration: return 'Esca Nigeria, NGN a/c'
+                elif 'resrv' in narration: return 'Resrv FX, NGN a/c'
+                elif 'waza' in narration: return 'Waza, Nigeria, NGN a/c'
+                elif 'flutterwave' in narration: return 'Flutterwave, NGN a/c'
+                elif 'inexass' in narration: return 'AZA Finance, NGN a/c'
+                elif 'nala' in narration: return 'Nala Payments'
+                elif 'south one' in narration: return 'Southone NGN a/c'
+                elif 'titan-paystack' in narration or 'multigate' in narration: return 'Multigate, NGN a/c'
+                elif 'zerozilo' in narration or 'silverfile' in narration or 'palm bills' in narration: return 'Fincra, NGN a/c'
+                elif 'ift technologies' in narration or 'budpay' in narration or 'bud infrastructure' in narration: return 'Torus Mara, NGN a/c'
+                elif 'starks associates limited' in narration or 'shamiri' in narration or 'second jeu' in narration: return 'Straitpay (Starks), UK, NGN a/c'
+                else: return 'Unknown'
 
-        MP_ng_bank_df['Sender_Name'] = MP_ng_bank_df['NARRATION'].apply(extract_sender_name)
-        
-        # Group by sender and 30-minute windows
-        MP_ng_bank_df_recon = MP_ng_bank_df.groupby(
-            ['Sender_Name', pd.Grouper(key='DATE', freq='30min')]
-        ).agg({
-            'AMOUNT': 'sum',
-            'NARRATION': 'first'
-        }).reset_index()
-        
-        MP_ng_bank_df_recon = MP_ng_bank_df_recon.rename(columns={
-            'DATE': 'Date',
-            'AMOUNT': 'Amount'
-        })
-        
-        MP_ng_bank_df_recon['Date_Match'] = MP_ng_bank_df_recon['Date'].dt.date
+            df_cleaned['SENDER_NAME'] = df_cleaned['NARRATION'].apply(extract_sender_name)
+            df_combined = df_cleaned.groupby(['SENDER_NAME', pd.Grouper(key='DATE', freq='30min')]).agg({
+                'AMOUNT': 'sum',
+                'NARRATION': lambda x: ' '.join(x.dropna().unique()),
+                'REFERENCE': lambda x: ' '.join(x.dropna().unique()),
+                'TRANSACTION_TYPE': 'first',
+            }).reset_index()
+            df_combined.rename(columns={'DATE': 'DATE_TIME_WINDOW_START', 'AMOUNT': 'Amount'}, inplace=True)
+            return df_combined
+
+        MP_ng_bank_df_recon = preprocess_moniepoint_bank(MP_ng_bank_df)
+        if MP_ng_bank_df_recon.empty:
+            st.warning("No bank records to reconcile after preprocessing.")
+            summary = {"Total Internal Records (for recon)": len(MP_ng_hex_df_recon), "Total Bank Statement Records (for recon)": 0}
+            return matched_total, MP_ng_hex_df_recon, final_unmatched_bank, summary
+
+        MP_ng_bank_df_recon['Date_Match'] = MP_ng_bank_df_recon['DATE_TIME_WINDOW_START'].dt.date
         MP_ng_bank_df_recon['Amount_Rounded'] = MP_ng_bank_df_recon['Amount'].round(2)
-        MP_ng_bank_df_recon['ID'] = 'Bank_' + MP_ng_bank_df_recon.index.astype(str)
+
+        # --- 4. Calculate Total Amounts and Discrepancy ---
+        total_internal_credits = MP_ng_hex_df_recon['Amount'].sum()
+        total_bank_credits = MP_ng_bank_df_recon['Amount'].sum()
+        discrepancy_amount = total_internal_credits - total_bank_credits
 
         # --- 5. Reconciliation ---
-        matched_df, unmatched_internal_df, unmatched_bank_df = perform_date_tolerance_matching(
-            MP_ng_hex_df_recon,
-            MP_ng_bank_df_recon,
-            tolerance_days=3
+        reconciled_df = pd.merge(
+            MP_ng_hex_df_recon.assign(Source_Internal='Internal'),
+            MP_ng_bank_df_recon.assign(Source_Bank='Bank'),
+            on=['Date_Match', 'Amount_Rounded'],
+            how='outer',
+            suffixes=('_Internal', '_Bank')
         )
-        
-        # Add sender name to matched transactions
-        if not matched_df.empty and 'ID_Bank' in matched_df.columns:
-            sender_mapping = MP_ng_bank_df_recon.set_index('ID')['Sender_Name'].to_dict()
-            matched_df['Sender_Name'] = matched_df['ID_Bank'].map(sender_mapping)
 
-        # --- 6. Generate Summary ---
-        total_internal = len(MP_ng_hex_df_recon)
-        total_bank = len(MP_ng_bank_df_recon)
-        total_matched = len(matched_df)
-        accuracy = (total_matched / total_internal * 100) if total_internal > 0 else 0
-        
+        matched_transactions = reconciled_df.dropna(subset=['Source_Internal', 'Source_Bank']).copy()
+
+        unmatched_internal_for_tolerance = reconciled_df[reconciled_df['Source_Bank'].isna()].copy()
+        unmatched_bank_for_tolerance = reconciled_df[reconciled_df['Source_Internal'].isna()].copy()
+
+        # Prepare for date tolerance matching
+        if not unmatched_internal_for_tolerance.empty:
+            unmatched_internal_for_tolerance = unmatched_internal_for_tolerance.rename(columns={
+                'Date_Internal': 'Date', 'Amount_Internal': 'Amount',
+                'Description_Internal': 'Description', 'ID_Internal': 'ID'
+            })[['Date', 'Amount', 'Description', 'ID', 'Amount_Rounded']].copy()
+        else:
+            unmatched_internal_for_tolerance = create_empty_unmatched_df()
+
+        if not unmatched_bank_for_tolerance.empty:
+            unmatched_bank_for_tolerance = unmatched_bank_for_tolerance.rename(columns={
+                'Date_Bank': 'Date', 'Amount_Bank': 'Amount',
+            })[['Date', 'Amount', 'Amount_Rounded']].copy()
+        else:
+            unmatched_bank_for_tolerance = create_empty_unmatched_df()
+
+
+        matched_with_tolerance = pd.DataFrame()
+        if not unmatched_internal_for_tolerance.empty and not unmatched_bank_for_tolerance.empty:
+            st.info("Attempting date tolerance matching for remaining unmatched records (MoniePoint)...")
+            matched_with_tolerance, final_unmatched_internal, final_unmatched_bank = \
+                perform_date_tolerance_matching(
+                    unmatched_internal_for_tolerance,
+                    unmatched_bank_for_tolerance,
+                    tolerance_days=3
+                )
+        else:
+            final_unmatched_internal = unmatched_internal_for_tolerance
+            final_unmatched_bank = unmatched_bank_for_tolerance
+
+
+        matched_total = pd.concat([matched_transactions, matched_with_tolerance], ignore_index=True)
+
+        # --- 6. Summary of Reconciliation ---
+        total_matched_amount_internal = matched_total['Amount_Internal'].sum() if 'Amount_Internal' in matched_total.columns else 0
+        total_matched_amount_bank = matched_total['Amount_Bank'].sum() if 'Amount_Bank' in matched_total.columns else 0
+        remaining_unmatched_internal_amount = final_unmatched_internal['Amount'].sum() if not final_unmatched_internal.empty else 0
+        remaining_unmatched_bank_amount = final_unmatched_bank['Amount'].sum() if not final_unmatched_bank.empty else 0
+
         summary = {
-            "Provider name": "Moniepoint",
-            "Currency": "NGN",
-            "Month & Year": f"{recon_month}/{recon_year}" if recon_month and recon_year else datetime.datetime.now().strftime("%m/%Y"),
-            "# of Transactions": total_matched,
-            "Partner Statement": MP_ng_bank_df_recon['Amount'].sum(),
-            "Treasury Records": MP_ng_hex_df_recon['Amount'].sum(),
-            "Variance": MP_ng_hex_df_recon['Amount'].sum() - MP_ng_bank_df_recon['Amount'].sum(),
-            "% accuracy": f"{accuracy:.2f}%",
-            "Status": "Matched" if unmatched_internal_df.empty and unmatched_bank_df.empty else "Partial",
-            "Timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "Comments": ""
+            "Total Internal Records (for recon)": len(MP_ng_hex_df_recon),
+            "Total Bank Statement Records (for recon)": len(MP_ng_bank_df_recon),
+            "Total Internal Credits (Original)": total_internal_credits,
+            "Total Bank Credits (Original)": total_bank_credits,
+            "Overall Discrepancy (Original)": discrepancy_amount,
+            "Total Matched Transactions (All Stages)": len(matched_total),
+            "Total Matched Amount (Internal)": total_matched_amount_internal,
+            "Total Matched Amount (Bank)": total_matched_amount_bank,
+            "Unmatched Internal Records (Final)": len(final_unmatched_internal),
+            "Unmatched Bank Records (Final)": len(final_unmatched_bank),
+            "Unmatched Internal Amount (Final)": remaining_unmatched_internal_amount,
+            "Unmatched Bank Amount (Final)": remaining_unmatched_bank_amount,
+            "Currency": "NGN"
         }
 
-        return matched_df, unmatched_internal_df, unmatched_bank_df, summary
+        return matched_total, final_unmatched_internal, final_unmatched_bank, summary
 
     except Exception as e:
-        st.error(f"Moniepoint Reconciliation error: {str(e)}")
-        return empty_df, empty_unmatched, empty_unmatched, {}
+        st.error(f"An unexpected error occurred during MoniePoint reconciliation: {str(e)}")
+        # **FIX**: Return 4 values to prevent the unpack error in the UI
+        return matched_total, final_unmatched_internal, final_unmatched_bank, summary
     
 # --- Helper Functions for Reports Storage ---      
 def load_all_reports():
@@ -3286,7 +3310,7 @@ RECONCILIATION_FUNCTIONS = {
 # Manually map specific functions that don't follow the direct naming convention
 RECONCILIATION_FUNCTIONS["Equity KE"] = reconcile_equity_ke
 RECONCILIATION_FUNCTIONS["Cellulant KE"] = reconcile_cellulant_ke
-RECONCILIATION_FUNCTIONS["Zamupay (PYCS)"] = reconcile_zamupay
+RECONCILIATION_FUNCTIONS["Zamupay PYCS"] = reconcile_zamupay
 RECONCILIATION_FUNCTIONS["Selcom TZ"] = reconcile_selcom_tz
 RECONCILIATION_FUNCTIONS["Equity TZ"] = reconcile_equity_tz
 RECONCILIATION_FUNCTIONS["Cellulant TZ"] = reconcile_cellulant_tz
