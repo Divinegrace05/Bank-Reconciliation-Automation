@@ -1468,10 +1468,6 @@ def reconcile_i_and_m_kes(internal_file_obj, bank_file_obj):
             (~im_bank_df['Narration'].astype(str).str.contains('excise duty', case=False, na=False))
         ].copy()
 
-        # Now it's safe to check the length
-        st.write(f"Bank records before filtering: {bank_records_before_filtering}")
-        st.write(f"Bank records after filtering: {len(im_bank_df_recon)}")
-
         if im_bank_df_recon.empty:
             st.warning("No valid bank records found after filtering for specified narration patterns.")
             return matched_transactions, unmatched_internal, unmatched_bank, summary
