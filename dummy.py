@@ -24,7 +24,7 @@ print(f"Reports will be stored in: {REPORTS_DIR}")  # Debug output
 # --- Configuration Data ---
 # Define the global structure for countries and banks
 COUNTRIES_BANKS = {
-    "Kenya": ["Pesaswap", "Zamupay PYCS", "Equity KE", "Cellulant KE", "Mpesa KE", "I&M KES", "I&M USD KE", "NCBA KES", "NCBA USD"],
+    "Kenya": ["Pesaswap", "Zamupay PYCS", "Equity KE", "Cellulant KE", "Mpesa KE", "I&M KES", "I&M USD (KE)", "NCBA KES", "NCBA USD"],
     "Tanzania": ["NMB", "M-pesa TZ", "Selcom TZ", "CRDB TZS", "CRDB USD", "Equity TZ", "Cellulant TZ", "I&M TZS", "I&M USD (TZ)", "UBA"],
     "Uganda": ["Pegasus", "Flutterwave Ug", "Equity UGX", "Equity Ug USD"],
     "Ghana": ["Flutterwave GHS", "Fincra GHS", "Zeepay"],
