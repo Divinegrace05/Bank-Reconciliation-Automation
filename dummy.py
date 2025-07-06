@@ -9,6 +9,7 @@ from pathlib import Path
 from io import StringIO
 import time
 import openpyxl
+import msoffcrypto
 
 # --- Configuration for Reports Storage ---
 # Define the base directory in your home folder
@@ -34,6 +35,15 @@ COUNTRIES_BANKS = {
 }
 
 MONTH_FILTER_BANKS = ["Verto", "Moniepoint"] # Needing month filter
+
+def decrypt_excel(file_obj, password):
+    file_obj.seek(0)
+    decrypted_file = BytesIO()
+    office_file = msoffcrypto.OfficeFile(file_obj)
+    office_file.load_key(password=str(138362))
+    office_file.decrypt(decrypted_file)
+    decrypted_file.seek(0)
+    return decrypted_file
 
 def check_duplicates(internal_df, bank_name):
     """Check for duplicate amounts in internal records and return them with comments."""
@@ -657,11 +667,6 @@ def reconcile_cellulant_ke(internal_file_obj, bank_file_obj):
     else:
         matched_total = matched_initial
 
-
-    # --- Stage 2: Daily Grouping and Amount Matching (To be implemented later) ---
-    # As discussed, we'll implement this stage after date tolerance is verified.
-
-
     # --- 6. Summary of Reconciliation ---
     total_matched_amount_internal = matched_total['Amount_Internal'].sum() if 'Amount_Internal' in matched_total.columns else 0
     total_matched_amount_bank = matched_total['Amount_Bank'].sum() if 'Amount_Bank' in matched_total.columns else 0
@@ -774,12 +779,10 @@ def reconcile_zamupay(internal_file_obj, bank_file_obj):
     zamupay_bank_df_recon = zamupay_bank_df[zamupay_bank_df['Amount'] > 0].copy()
     zamupay_bank_df_recon.loc[:, 'Date_Match'] = zamupay_bank_df_recon['Date'].dt.date
 
-
     # --- 3. Calculate Total Amounts and Discrepancy (before reconciliation) ---
     total_internal_credits = zamupay_internal_df_recon['Amount'].sum()
     total_bank_credits = zamupay_bank_df_recon['Amount'].sum()
     discrepancy_amount = total_internal_credits - total_bank_credits
-
 
     # --- 4. Reconciliation (transaction-level, exact date match) ---
     zamupay_internal_df_recon.loc[:, 'Amount_Rounded'] = zamupay_internal_df_recon['Amount'].round(2)
@@ -823,7 +826,6 @@ def reconcile_zamupay(internal_file_obj, bank_file_obj):
         unmatched_bank_for_tolerance = pd.DataFrame(columns=['Date', 'Amount', 'Amount_Rounded', 'Source'])
         unmatched_bank_for_tolerance['Date'] = pd.to_datetime(unmatched_bank_for_tolerance['Date'])
 
-
     # --- 5. Reconciliation with Date Tolerance (3 days) using perform_date_tolerance_matching ---
     matched_zamupay_with_tolerance = pd.DataFrame()
     unmatched_internal_after_tolerance = unmatched_internal_for_tolerance.copy()
@@ -837,7 +839,6 @@ def reconcile_zamupay(internal_file_obj, bank_file_obj):
                 unmatched_bank_for_tolerance,
                 tolerance_days=3 # Allowing up to 3 days difference
             )
-
 
     # --- 6. Reconciliation by Grouping Bank Records (Split Transactions) ---
     matched_by_aggregation_list = []
@@ -907,14 +908,12 @@ def reconcile_zamupay(internal_file_obj, bank_file_obj):
                     # Remove them from temp_unmatched_bank_for_agg to avoid re-matching
                     temp_unmatched_bank_for_agg = temp_unmatched_bank_for_agg.drop(contributing_bank_records.index)
 
-
     matched_zamupay_by_aggregation = pd.DataFrame(matched_by_aggregation_list)
 
     # Remove matched records from the current unmatched dataframes
     final_unmatched_zamupay_internal = current_unmatched_internal_agg.drop(internal_indices_matched_by_agg)
     # Remove only those bank records that were part of an aggregation
     final_unmatched_zamupay_bank = temp_unmatched_bank_for_agg.drop(columns=['Date_DT'], errors='ignore') # Remove temp column
-
 
     # --- 7. Final Summary of Reconciliation ---
     # Combine all matched dataframes for total counts and amounts
@@ -953,7 +952,227 @@ def reconcile_zamupay(internal_file_obj, bank_file_obj):
     }
     # Return the aggregated matched dataframe, final unmatched dataframes, and the summary
     return matched_total, final_unmatched_zamupay_internal, final_unmatched_zamupay_bank, summary
-    
+
+def reconcile_pesaswap(internal_file_obj, bank_file_obj):
+    """
+    Performs reconciliation for Pesaswap Kenya with enhanced file handling.
+    Supports both .xlsx and .xls formats with multiple engine attempts.
+    """
+    # Initialize empty DataFrames
+    matched_transactions = pd.DataFrame(columns=[
+        'Date_Internal', 'Amount_Internal', 'ID_Internal',
+        'Date_Bank', 'Amount_Bank', 'ID_Bank',
+        'Amount_Rounded'
+    ])
+    unmatched_internal = pd.DataFrame(columns=['Date', 'Amount', 'ID', 'Amount_Rounded'])
+    unmatched_bank = pd.DataFrame(columns=['Date', 'Amount', 'ID', 'Amount_Rounded'])
+    summary = {}
+
+    try:
+        # --- 1. Load internal records ---
+        internal_file_obj.seek(0)  # Ensure file pointer is at the start
+        pesaswap_hex_df = read_uploaded_file(internal_file_obj, header=0)
+        if pesaswap_hex_df is None:
+            st.error("Failed to load internal records file.")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        # --- 2. Load bank statement with multiple attempts ---
+        pesaswap_bank_df = None
+        file_name = bank_file_obj.name.lower() if hasattr(bank_file_obj, 'name') else "unknown"
+        
+        # Decrypt the bank file first
+        try:
+            decrypted_bank_file = decrypt_excel(bank_file_obj, password='YourPasswordHere')
+        except Exception as e:
+            st.error(f"Failed to decrypt bank file: {e}")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        # Now try loading with different engines
+        for engine in ['openpyxl']:
+            for header_row in [15]:
+                try:
+                    decrypted_bank_file.seek(0)
+                    pesaswap_bank_df = pd.read_excel(
+                        decrypted_bank_file,
+                        engine=engine,
+                        header=header_row
+                    )
+                    # Validate that we have the required columns
+                    if 'Transaction Date' in pesaswap_bank_df.columns and 'Credit Amount' in pesaswap_bank_df.columns:
+                        st.success(f"Bank file loaded successfully with engine={engine}, header={header_row}")
+                        break
+                except Exception as e:
+                    continue
+            if pesaswap_bank_df is not None:
+                break
+
+        if pesaswap_bank_df is None:
+            st.error("Could not load bank statement with any engine/header combination.")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        # --- 3. Preprocessing for internal records ---
+        pesaswap_hex_df.columns = pesaswap_hex_df.columns.astype(str).str.strip()
+
+        # Essential columns for internal records
+        internal_required_cols = ['TRANSFER_DATE', 'AMOUNT']
+        if not all(col in pesaswap_hex_df.columns for col in internal_required_cols):
+            missing_cols = [col for col in internal_required_cols if col not in pesaswap_hex_df.columns]
+            st.error(f"Internal records are missing essential columns: {', '.join(missing_cols)}.")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        pesaswap_hex_df = pesaswap_hex_df.rename(columns={
+            'TRANSFER_DATE': 'Date',
+            'AMOUNT': 'Amount',
+            'COMMENT': 'Description',
+            'TRANSFER_ID': 'ID'
+        })
+
+        # Convert and filter dates
+        pesaswap_hex_df['Date'] = pd.to_datetime(pesaswap_hex_df['Date'], errors='coerce')
+        pesaswap_hex_df = pesaswap_hex_df.dropna(subset=['Date']).copy()
+
+        # Filter positive amounts and prepare for reconciliation
+        pesaswap_hex_df_recon = pesaswap_hex_df[pesaswap_hex_df['Amount'] > 0].copy()
+        pesaswap_hex_df_recon['Date_Match'] = pesaswap_hex_df_recon['Date'].dt.date
+        pesaswap_hex_df_recon['Amount_Rounded'] = pesaswap_hex_df_recon['Amount'].round(2)
+
+        # --- Extract currency from internal_df ---
+        extracted_currency = "KES"  # Default for Pesaswap Kenya
+        if 'CURRENCY' in pesaswap_hex_df.columns and not pesaswap_hex_df['CURRENCY'].empty:
+            unique_currencies = pesaswap_hex_df['CURRENCY'].dropna().unique()
+            if unique_currencies.size > 0:
+                extracted_currency = str(unique_currencies[0])
+
+        # --- 4. Preprocessing for bank statements (Pesaswap Specific) ---
+        pesaswap_bank_df.columns = pesaswap_bank_df.columns.astype(str).str.strip()
+
+        # Essential columns for bank statements
+        bank_required_cols = ['Transaction Date', 'Credit Amount', 'Transaction Details']
+        if not all(col in pesaswap_bank_df.columns for col in bank_required_cols):
+            missing_cols = [col for col in bank_required_cols if col not in pesaswap_bank_df.columns]
+            st.error(f"Bank statement is missing essential columns: {', '.join(missing_cols)}.")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        pesaswap_bank_df = pesaswap_bank_df.rename(columns={
+            'Transaction Date': 'Date',
+            'Credit Amount': 'Credit',
+            'Transaction Details': 'Description',
+            'Transaction ID': 'ID'
+        })
+
+        # Convert dates
+        pesaswap_bank_df['Date'] = pd.to_datetime(pesaswap_bank_df['Date'], errors='coerce')
+        pesaswap_bank_df = pesaswap_bank_df.dropna(subset=['Date']).copy()
+
+        # Pesaswap Specific Filters
+        # 1. Filter for positive credits only
+        pesaswap_bank_df['Credit'] = pd.to_numeric(
+            pesaswap_bank_df['Credit'].astype(str).str.replace(',', '', regex=False),
+            errors='coerce'
+        ).fillna(0)
+        pesaswap_bank_df = pesaswap_bank_df[pesaswap_bank_df['Credit'] > 0].copy()
+
+        # 2. Filter for transactions containing 'Nala' in Description
+        pesaswap_bank_df = pesaswap_bank_df[
+            pesaswap_bank_df['Description'].astype(str).str.contains('Nala', case=False, na=False)
+        ].copy()
+
+        if pesaswap_bank_df.empty:
+            st.warning("No bank records found after applying Pesaswap filters (positive credits with 'Nala' in description).")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        pesaswap_bank_df['Amount'] = pesaswap_bank_df['Credit']
+        pesaswap_bank_df_recon = pesaswap_bank_df[['Date', 'Amount', 'Description', 'ID']].copy()
+        pesaswap_bank_df_recon['Date_Match'] = pesaswap_bank_df_recon['Date'].dt.date
+        pesaswap_bank_df_recon['Amount_Rounded'] = pesaswap_bank_df_recon['Amount'].round(2)
+
+        # --- 5. Calculate Total Amounts and Discrepancy (before reconciliation) ---
+        total_internal_credits = pesaswap_hex_df_recon['Amount'].sum()
+        total_bank_credits = pesaswap_bank_df_recon['Amount'].sum()
+        discrepancy_amount = total_internal_credits - total_bank_credits
+
+        # --- 6. Reconciliation (Exact Match) ---
+        reconciled_df = pd.merge(
+            pesaswap_hex_df_recon.assign(Source_Internal='Internal'),
+            pesaswap_bank_df_recon.assign(Source_Bank='Bank'),
+            on=['Date_Match', 'Amount_Rounded'],
+            how='outer',
+            suffixes=('_Internal', '_Bank')
+        )
+
+        matched_exact = reconciled_df.dropna(subset=['Source_Internal', 'Source_Bank']).copy()
+
+        # --- 7. Prepare initially unmatched records for tolerance matching ---
+        unmatched_internal_initial = reconciled_df[reconciled_df['Source_Bank'].isna()].copy()
+        if not unmatched_internal_initial.empty:
+            unmatched_internal_initial = unmatched_internal_initial[[
+                'Date_Internal', 'Amount_Internal', 'ID_Internal', 'Amount_Rounded'
+            ]].rename(columns={
+                'Date_Internal': 'Date', 'Amount_Internal': 'Amount', 'ID_Internal': 'ID'
+            }).copy()
+            unmatched_internal_initial['Date'] = pd.to_datetime(unmatched_internal_initial['Date'])
+        else:
+            unmatched_internal_initial = pd.DataFrame(columns=['Date', 'Amount', 'ID', 'Amount_Rounded'])
+            unmatched_internal_initial['Date'] = pd.to_datetime(unmatched_internal_initial['Date'])
+
+        unmatched_bank_initial = reconciled_df[reconciled_df['Source_Internal'].isna()].copy()
+        if not unmatched_bank_initial.empty:
+            unmatched_bank_initial = unmatched_bank_initial[[
+                'Date_Bank', 'Amount_Bank', 'ID_Bank', 'Amount_Rounded'
+            ]].rename(columns={
+                'Date_Bank': 'Date', 'Amount_Bank': 'Amount', 'ID_Bank': 'ID'
+            }).copy()
+            unmatched_bank_initial['Date'] = pd.to_datetime(unmatched_bank_initial['Date'])
+        else:
+            unmatched_bank_initial = pd.DataFrame(columns=['Date', 'Amount', 'ID', 'Amount_Rounded'])
+            unmatched_bank_initial['Date'] = pd.to_datetime(unmatched_bank_initial['Date'])
+
+        # --- 8. Reconciliation with Date Tolerance (3 days) ---
+        matched_with_tolerance = pd.DataFrame()
+        final_unmatched_internal = unmatched_internal_initial.copy()
+        final_unmatched_bank = unmatched_bank_initial.copy()
+
+        if not unmatched_internal_initial.empty and not unmatched_bank_initial.empty:
+            st.info("Attempting date tolerance matching for remaining unmatched records (Pesaswap)...")
+            matched_with_tolerance, final_unmatched_internal, final_unmatched_bank = \
+                perform_date_tolerance_matching(
+                    unmatched_internal_initial,
+                    unmatched_bank_initial,
+                    tolerance_days=3
+                )
+
+        # --- 9. Combine all matched records ---
+        matched_total = pd.concat([matched_exact, matched_with_tolerance], ignore_index=True)
+
+        # --- 10. Summary of Reconciliation ---
+        total_matched_amount_internal = matched_total['Amount_Internal'].sum() if 'Amount_Internal' in matched_total.columns else 0
+        total_matched_amount_bank = matched_total['Amount_Bank'].sum() if 'Amount_Bank' in matched_total.columns else 0
+        remaining_unmatched_internal_amount = final_unmatched_internal['Amount'].sum() if 'Amount' in final_unmatched_internal.columns else 0
+        remaining_unmatched_bank_amount = final_unmatched_bank['Amount'].sum() if 'Amount' in final_unmatched_bank.columns else 0
+
+        summary = {
+            "Total Internal Records (for recon)": len(pesaswap_hex_df_recon),
+            "Total Bank Statement Records (for recon)": len(pesaswap_bank_df_recon),
+            "Total Internal Credits (Original)": total_internal_credits,
+            "Total Bank Credits (Original)": total_bank_credits,
+            "Overall Discrepancy (Original)": discrepancy_amount,
+            "Total Matched Transactions (All Stages)": len(matched_total),
+            "Total Matched Amount (Internal)": total_matched_amount_internal,
+            "Total Matched Amount (Bank)": total_matched_amount_bank,
+            "Unmatched Internal Records (Final)": len(final_unmatched_internal),
+            "Unmatched Bank Records (Final)": len(final_unmatched_bank),
+            "Unmatched Internal Amount (Final)": remaining_unmatched_internal_amount,
+            "Unmatched Bank Amount (Final)": remaining_unmatched_bank_amount,
+            "Currency": extracted_currency,
+            "% accuracy": f"{(total_bank_credits / total_internal_credits * 100):.2f}%" if total_internal_credits != 0 else "N/A"
+        }
+
+    except Exception as e:
+        st.error(f"Error during Pesaswap reconciliation processing: {str(e)}")
+        return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+    return matched_total, final_unmatched_internal, final_unmatched_bank, summary       
+        
 def reconcile_selcom_tz(internal_file_obj, bank_file_obj):
     """
     Performs reconciliation for Selcom TZ.
@@ -1970,7 +2189,7 @@ def reconcile_verto(internal_file_obj, bank_file_obj, recon_month=None, recon_ye
         for header_row in [8, 0]:  # Try header=8 first, then header=0
             verto_bank_df = read_uploaded_file(bank_file_obj, header=header_row)
             if 'Date' in verto_bank_df.columns and 'Credit' in verto_bank_df.columns:
-                #st.success(f"Bank file loaded successfully with header={header_row}")
+                st.success(f"Bank file loaded successfully with header={header_row}")
                 break
         else:
             st.error("Could not find required columns ('Date', 'Credit') in bank file")
@@ -3307,13 +3526,25 @@ RECONCILIATION_FUNCTIONS = {
     for country_banks in COUNTRIES_BANKS.values()
     for bank in country_banks
 }
+
 # Manually map specific functions that don't follow the direct naming convention
+# KE
 RECONCILIATION_FUNCTIONS["Equity KE"] = reconcile_equity_ke
 RECONCILIATION_FUNCTIONS["Cellulant KE"] = reconcile_cellulant_ke
 RECONCILIATION_FUNCTIONS["Zamupay PYCS"] = reconcile_zamupay
+RECONCILIATION_FUNCTIONS["Pesaswap"] = reconcile_pesaswap
+
+#RECONCILIATION_FUNCTIONS["Mpesa KE"] = reconcile_mpesa_ke
+#RECONCILIATION_FUNCTIONS["I&M KES"] = reconcile_i&m_ke
+#RECONCILIATION_FUNCTIONS["I&M USD (KE)"] = reconcile_i&m_usd_ke
+#RECONCILIATION_FUNCTIONS["NCBA KES"] = reconcile_ncba_kes
+#RECONCILIATION_FUNCTIONS["NCBA USD"] = reconcile_ncba_usd
+
+# TZ
 RECONCILIATION_FUNCTIONS["Selcom TZ"] = reconcile_selcom_tz
 RECONCILIATION_FUNCTIONS["Equity TZ"] = reconcile_equity_tz
 RECONCILIATION_FUNCTIONS["Cellulant TZ"] = reconcile_cellulant_tz
+# NGN
 RECONCILIATION_FUNCTIONS["Fincra NGN"] = reconcile_fincra
 RECONCILIATION_FUNCTIONS["Flutterwave NGN"] = reconcile_flutterwave_ngn
 RECONCILIATION_FUNCTIONS["Moniepoint"] = reconcile_moniepoint
@@ -3359,6 +3590,12 @@ def homepage():
 def reconciliation_page():
     st.header(f"Reconcile: {st.session_state.selected_bank}")
     
+    # Initialize session state for Pesaswap file unlocked flag and feedback if not present
+    if 'pesaswap_file_unlocked' not in st.session_state:
+        st.session_state.pesaswap_file_unlocked = False
+    if 'pesaswap_feedback' not in st.session_state:
+        st.session_state.pesaswap_feedback = None
+    
     # Only show month/year filter for Nigerian banks
     if st.session_state.selected_bank in MONTH_FILTER_BANKS:
         recon_date = st.date_input("Reconciliation Month", 
@@ -3377,19 +3614,35 @@ def reconciliation_page():
     with col2:
         bank_file = st.file_uploader("Bank Statement (CSV/Excel)", type=["csv", "xlsx", "xls"])
 
+    # Reset Pesaswap session state if a new bank file is uploaded
+    if bank_file is not None and bank_file != st.session_state.get('bank_file'):
+        if 'unlocked_pesaswap_bank' in st.session_state:
+            del st.session_state.unlocked_pesaswap_bank
+        st.session_state.pesaswap_file_unlocked = False
+        st.session_state.pesaswap_feedback = None
+
     # Store uploaded files in session state
     if internal_file is not None:
         st.session_state.internal_file = internal_file
     if bank_file is not None:
         st.session_state.bank_file = bank_file
 
+    # Display feedback if available
+    feedback_placeholder = st.empty()
+    if st.session_state.pesaswap_feedback:
+        if "Error" in st.session_state.pesaswap_feedback:
+            feedback_placeholder.error(st.session_state.pesaswap_feedback)
+        elif "successfully" in st.session_state.pesaswap_feedback.lower():
+            feedback_placeholder.success(st.session_state.pesaswap_feedback)
+        else:
+            feedback_placeholder.warning(st.session_state.pesaswap_feedback)
+
     # Add duplicate check button
     check_dupes = st.checkbox("Check for duplicated records")
     
-    # First load the internal file to check for duplicates if requested
+    # Check for duplicates if requested
     if check_dupes and 'internal_file' in st.session_state:
         try:
-            # Read from the beginning of the file
             st.session_state.internal_file.seek(0)
             internal_df = read_uploaded_file(st.session_state.internal_file, header=0)
             if internal_df is not None:
@@ -3403,14 +3656,23 @@ def reconciliation_page():
         except Exception as e:
             st.warning(f"Could not check for duplicates: {str(e)}")
 
-    if st.button("Run Reconciliation", type="primary"):
-        check_dupes = False
-        
+    # Run reconciliation automatically if Pesaswap file is unlocked or manually via button
+    run_reconciliation = st.button("Run Reconciliation", type="primary")
+    
+    # Trigger reconciliation if either:
+    # 1. The "Run Reconciliation" button is clicked, or
+    # 2. The bank is Pesaswap, the file is unlocked, and both files are uploaded
+    if run_reconciliation or (
+        st.session_state.selected_bank == "Pesaswap" and 
+        st.session_state.pesaswap_file_unlocked and 
+        'internal_file' in st.session_state and 
+        'bank_file' in st.session_state
+    ):
         if 'internal_file' not in st.session_state or 'bank_file' not in st.session_state:
-            st.warning("Please upload both files")
+            feedback_placeholder.warning("Please upload both files")
             return
             
-        with st.spinner("Processing..."):
+        with st.spinner("Processing reconciliation..."):
             # Get the appropriate reconciliation function
             recon_func = RECONCILIATION_FUNCTIONS.get(st.session_state.selected_bank, placeholder_reconcile)
             
@@ -3428,16 +3690,21 @@ def reconciliation_page():
                         recon_year=recon_year
                     )
                 else:
-                    # For non-Nigerian banks, call with just the two required parameters
                     matched, unmatched_int, unmatched_bank, summary = recon_func(
                         st.session_state.internal_file,
                         st.session_state.bank_file
                     )
                 
-                # Display Results
-                st.success("Reconciliation Complete ✅")
+                # Reset Pesaswap session state after successful reconciliation
+                if st.session_state.selected_bank == "Pesaswap":
+                    st.session_state.pesaswap_file_unlocked = False
+                    st.session_state.pesaswap_feedback = None
+                    if 'unlocked_pesaswap_bank' in st.session_state:
+                        del st.session_state.unlocked_pesaswap_bank
                 
-                # Rest of your display code remains the same...
+                # Display Results
+                feedback_placeholder.success("Reconciliation Complete ✅")
+                
                 cols = st.columns(5)
                 cols[0].metric("Total Matched", summary.get("# of Transactions", summary.get("Total Matched Transactions (All Stages)", 0)))
                 
@@ -3474,7 +3741,7 @@ def reconciliation_page():
                     delta_color=delta_color
                 )
                 
-                # Results Tabs - Updated to handle display properly
+                # Results Tabs
                 tab1, tab2, tab3 = st.tabs(["Unmatched Internal", "Unmatched Bank", "Matched"])
                 
                 with tab1:
@@ -3496,12 +3763,16 @@ def reconciliation_page():
                         st.dataframe(matched)
                 
             except Exception as e:
-                st.error(f"Error during reconciliation: {str(e)}")
+                feedback_placeholder.error(f"Error during reconciliation: {str(e)}")
                 st.error("Please check your input files and try again.")
 
     # Add a back button to return to the homepage
     if st.button("Back to Home"):
         st.session_state.page = "home"
+        st.session_state.pesaswap_file_unlocked = False
+        st.session_state.pesaswap_feedback = None
+        if 'unlocked_pesaswap_bank' in st.session_state:
+            del st.session_state.unlocked_pesaswap_bank
         st.rerun()
 
 def reports_page():
