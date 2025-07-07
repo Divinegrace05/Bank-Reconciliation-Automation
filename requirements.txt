@@ -8,3 +8,4 @@ requests==2.32.3
 pyyaml==6.0.2
 pytz==2024.2
 msoffcrypto-tool
+xlrd>=2.0.1
