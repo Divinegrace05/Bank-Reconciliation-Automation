@@ -697,13 +697,13 @@ def reconcile_zamupay(internal_file_obj, bank_file_obj):
     """
     Performs comprehensive reconciliation for Zamupay (PYCS).
     Incorporates exact match, 3-day date tolerance, and split transaction aggregation.
-    Expects internal_file_obj (CSV) and bank_file_obj (CSV).
+    Expects internal_file_obj (CSV) and bank_file_obj (CSV with header=2).
     Returns matched_total, final_unmatched_internal, final_unmatched_bank dataframes,
     and a summary dictionary.
     """
     try:
         zamupay_internal_df = read_uploaded_file(internal_file_obj, header=0)
-        zamupay_bank_df = read_uploaded_file(bank_file_obj, header=0)
+        zamupay_bank_df = read_uploaded_file(bank_file_obj, header=2)  # Changed to header=2
 
         # --- Extract currency from internal_df ---
         extracted_currency = "N/A" # Default in case column is missing or empty
@@ -743,41 +743,48 @@ def reconcile_zamupay(internal_file_obj, bank_file_obj):
     zamupay_internal_df_recon = zamupay_internal_df[zamupay_internal_df['Amount'] > 0].copy()
     zamupay_internal_df_recon.loc[:, 'Date_Match'] = zamupay_internal_df_recon['Date'].dt.date
 
-    # --- 2. Preprocessing for Zamupay Bank Statements ---
+
+    # --- 2. Preprocessing for Zamupay Bank Statements (New Format) ---
     zamupay_bank_df.columns = zamupay_bank_df.columns.astype(str).str.strip()
 
     # Essential columns check for bank statements
-    bank_required_cols = ['Tran. Date', 'Credit Amt.', 'Particulars']
+    bank_required_cols = ['Value Date', 'Amount', 'Transaction Type']
     if not all(col in zamupay_bank_df.columns for col in bank_required_cols):
         missing_cols = [col for col in bank_required_cols if col not in zamupay_bank_df.columns]
         st.error(f"Bank statement (Zamupay) is missing essential columns: {', '.join(missing_cols)}.")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}
 
+    # Filter for Credit transactions only
+    zamupay_bank_df = zamupay_bank_df[
+        zamupay_bank_df['Transaction Type'].astype(str).str.upper() == 'CREDIT'
+    ].copy()
+
     zamupay_bank_df = zamupay_bank_df.rename(columns={
-        'Tran. Date': 'Date',
-        'Credit Amt.': 'Amount',
-        'Particulars': 'Description'
+        'Value Date': 'Date',
+        'Amount': 'Amount',
+        'Reference': 'Description'
     })
+    
     zamupay_bank_df['Date'] = pd.to_datetime(zamupay_bank_df['Date'], errors='coerce')
     zamupay_bank_df = zamupay_bank_df.dropna(subset=['Date']).copy()
 
-    zamupay_bank_df['Amount'] = zamupay_bank_df['Amount'].astype(str).str.replace(',', '', regex=False).astype(float)
+    # Clean amount column - remove commas and convert to float
+    zamupay_bank_df['Amount'] = (
+        zamupay_bank_df['Amount'].astype(str)
+        .str.replace(',', '', regex=False)
+        .astype(float)
+    )
 
-    # --- Filter out records with "REVERSAL" in 'Description' ---
-    if 'Description' in zamupay_bank_df.columns:
-        zamupay_bank_df = zamupay_bank_df[
-            ~zamupay_bank_df['Description'].astype(str).str.contains('REVERSAL', case=False, na=False)
-        ].copy()
-    else:
-        st.warning("Warning: 'Description' (Particulars) column not found in bank statement. Skipping 'REVERSAL' filter.")
-
+    # Filter positive amounts
     zamupay_bank_df_recon = zamupay_bank_df[zamupay_bank_df['Amount'] > 0].copy()
     zamupay_bank_df_recon.loc[:, 'Date_Match'] = zamupay_bank_df_recon['Date'].dt.date
+
 
     # --- 3. Calculate Total Amounts and Discrepancy (before reconciliation) ---
     total_internal_credits = zamupay_internal_df_recon['Amount'].sum()
     total_bank_credits = zamupay_bank_df_recon['Amount'].sum()
     discrepancy_amount = total_internal_credits - total_bank_credits
+
 
     # --- 4. Reconciliation (transaction-level, exact date match) ---
     zamupay_internal_df_recon.loc[:, 'Amount_Rounded'] = zamupay_internal_df_recon['Amount'].round(2)
@@ -790,6 +797,7 @@ def reconcile_zamupay(internal_file_obj, bank_file_obj):
         how='outer',
         suffixes=('_Internal', '_Bank')
     )
+
     matched_zamupay_transactions_exact = reconciled_zamupay_df_exact.dropna(subset=['Source_Internal', 'Source_Bank']).copy()
 
     # Prepare initially unmatched internal transactions for the next stage (Date Tolerance)
@@ -820,6 +828,7 @@ def reconcile_zamupay(internal_file_obj, bank_file_obj):
         unmatched_bank_for_tolerance = pd.DataFrame(columns=['Date', 'Amount', 'Amount_Rounded', 'Source'])
         unmatched_bank_for_tolerance['Date'] = pd.to_datetime(unmatched_bank_for_tolerance['Date'])
 
+
     # --- 5. Reconciliation with Date Tolerance (3 days) using perform_date_tolerance_matching ---
     matched_zamupay_with_tolerance = pd.DataFrame()
     unmatched_internal_after_tolerance = unmatched_internal_for_tolerance.copy()
@@ -834,6 +843,7 @@ def reconcile_zamupay(internal_file_obj, bank_file_obj):
                 tolerance_days=3 # Allowing up to 3 days difference
             )
 
+
     # --- 6. Reconciliation by Grouping Bank Records (Split Transactions) ---
     matched_by_aggregation_list = []
     # Copy for aggregation, ensuring 'Date' column is datetime for manipulation
@@ -842,6 +852,7 @@ def reconcile_zamupay(internal_file_obj, bank_file_obj):
 
     bank_indices_matched_by_agg = []
     internal_indices_matched_by_agg = []
+
     current_unmatched_internal_agg = unmatched_internal_after_tolerance.copy()
 
     if not current_unmatched_internal_agg.empty and not temp_unmatched_bank_for_agg.empty:
@@ -862,10 +873,12 @@ def reconcile_zamupay(internal_file_obj, bank_file_obj):
 
             # Group these potential bank records by date and sum their amounts
             grouped_bank_sums = potential_bank_records_in_range.groupby('Date_DT')['Amount_Rounded'].sum().reset_index()
+
             # Find if any aggregated sum matches the internal amount
             matched_agg_bank_entry = grouped_bank_sums[
                 grouped_bank_sums['Amount_Rounded'].round(2) == internal_amount
             ]
+
             if not matched_agg_bank_entry.empty:
                 # Take the first aggregated match
                 agg_date_dt = matched_agg_bank_entry.iloc[0]['Date_DT']
@@ -875,6 +888,7 @@ def reconcile_zamupay(internal_file_obj, bank_file_obj):
                 contributing_bank_records = temp_unmatched_bank_for_agg[
                     (temp_unmatched_bank_for_agg['Date_DT'] == agg_date_dt)
                 ]
+
                 # Double check if the sum of these contributing records still equals the internal amount
                 if contributing_bank_records['Amount_Rounded'].sum().round(2) == internal_amount:
                     new_matched_row = {
@@ -897,12 +911,15 @@ def reconcile_zamupay(internal_file_obj, bank_file_obj):
                     bank_indices_matched_by_agg.extend(contributing_bank_records.index.tolist())
                     # Remove them from temp_unmatched_bank_for_agg to avoid re-matching
                     temp_unmatched_bank_for_agg = temp_unmatched_bank_for_agg.drop(contributing_bank_records.index)
+
+
     matched_zamupay_by_aggregation = pd.DataFrame(matched_by_aggregation_list)
 
     # Remove matched records from the current unmatched dataframes
     final_unmatched_zamupay_internal = current_unmatched_internal_agg.drop(internal_indices_matched_by_agg)
     # Remove only those bank records that were part of an aggregation
     final_unmatched_zamupay_bank = temp_unmatched_bank_for_agg.drop(columns=['Date_DT'], errors='ignore') # Remove temp column
+
 
     # --- 7. Final Summary of Reconciliation ---
     # Combine all matched dataframes for total counts and amounts
@@ -917,6 +934,7 @@ def reconcile_zamupay(internal_file_obj, bank_file_obj):
             'Date_Internal', 'Amount_Internal', 'Date_Match_Internal', 'Source_Internal',
             'Date_Bank', 'Amount_Bank', 'Date_Match_Bank', 'Source_Bank', 'Amount_Rounded'
         ])
+
     total_matched_amount_internal = matched_total['Amount_Internal'].sum() if 'Amount_Internal' in matched_total.columns else 0
     total_matched_amount_bank = matched_total['Amount_Bank'].sum() if 'Amount_Bank' in matched_total.columns else 0
     remaining_unmatched_internal_amount = final_unmatched_zamupay_internal['Amount'].sum() if 'Amount' in final_unmatched_zamupay_internal.columns else 0
