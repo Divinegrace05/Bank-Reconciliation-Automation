@@ -25,12 +25,12 @@ print(f"Reports will be stored in: {REPORTS_DIR}")  # Debug output
 # Define the global structure for countries and banks
 COUNTRIES_BANKS = {
     "Kenya": ["Pesaswap", "Zamupay PYCS", "Equity KE", "Cellulant KE", "Mpesa KE", "I&M KES", "I&M USD Sending", "I&M USD Receiving", "NCBA KES", "NCBA USD"],
-    "Tanzania": ["NMB", "M-pesa TZ", "Selcom TZ", "CRDB TZS", "CRDB USD", "Equity TZ", "Cellulant TZ", "I&M TZS", "I&M USD (TZ)", "UBA"],
+    "Tanzania": ["NMB", "UBA", "Mpesa TZ", "Selcom TZ", "CRDB TZS", "CRDB USD", "Equity TZ", "Cellulant TZ", "I&M TZS", "I&M USD (TZ)"],
     "Uganda": ["Pegasus", "Flutterwave Ug", "Equity UGX", "Equity Ug USD"],
     "Ghana": ["Flutterwave GHS", "Fincra GHS", "Zeepay"],
-    "Senegal & Côte d'Ivoire XOF": ["Aza Finance", "Hub2 IC", "Hub2 SEN"],
+    "Senegal & Côte d'Ivoire XOF": ["Aza Finance XOF", "Hub2 IC", "Hub2 SEN"],
     "Rwanda": ["I&M RWF", "I&M USD (RWF)", "Kremit", "Flutterwave RWF"],
-    "Cameroon XAF": ["Peex", "Pawapay", "Aza Finance", "Hub2"],
+    "Cameroon XAF": ["Peex", "Pawapay", "Aza Finance XAF", "Hub2 XAF"],
     "Nigeria": ["Moniepoint", "Verto", "Cellulant NGN", "Flutterwave NGN", "Fincra NGN", "Zenith"]
 }
 
@@ -2522,6 +2522,368 @@ def reconcile_nmb(internal_file_obj, bank_file_obj):
 
     return matched_total, final_unmatched_internal, final_unmatched_bank, summary
 
+def reconcile_i_and_m_tzs(internal_file_obj, bank_file_obj):
+    """
+    Performs reconciliation for I&M Bank Tanzania (TZS).
+    Expects internal_file_obj (CSV/Excel) and bank_file_obj (CSV/Excel with header=17).
+    Filters for credit transactions where 'Credit' > 0.
+    Returns matched, unmatched_internal, unmatched_bank dataframes and a summary dictionary.
+    """
+    # Initialize empty DataFrames with proper columns
+    matched_transactions = create_empty_matched_df()
+    unmatched_internal = create_empty_unmatched_df()
+    unmatched_bank = create_empty_unmatched_df()
+    summary = {}
+
+    try:
+        # --- 1. Load the datasets ---
+        im_tz_hex_df = read_uploaded_file(internal_file_obj, header=0)
+        im_tz_bank_df = read_uploaded_file(bank_file_obj, header=17)
+        
+        if im_tz_hex_df is None or im_tz_bank_df is None:
+            st.error("One or both files could not be loaded for I&M TZS.")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        # --- 2. Preprocessing for internal records ---
+        im_tz_hex_df.columns = im_tz_hex_df.columns.astype(str).str.strip()
+
+        internal_required_cols = ['TRANSFER_DATE', 'AMOUNT']
+        if not all(col in im_tz_hex_df.columns for col in internal_required_cols):
+            missing_cols = [col for col in internal_required_cols if col not in im_tz_hex_df.columns]
+            st.error(f"Internal records are missing essential columns: {', '.join(missing_cols)}.")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        im_tz_hex_df = im_tz_hex_df.rename(columns={
+            'TRANSFER_DATE': 'Date', 
+            'AMOUNT': 'Amount',
+            'COMMENT': 'Description',
+            'TRANSFER_ID': 'ID'
+        })
+
+        # Convert and filter dates
+        im_tz_hex_df['Date'] = pd.to_datetime(im_tz_hex_df['Date'], errors='coerce')
+        im_tz_hex_df = im_tz_hex_df.dropna(subset=['Date']).copy()
+
+        # Filter positive amounts and prepare for reconciliation
+        im_tz_hex_df_recon = im_tz_hex_df[im_tz_hex_df['Amount'] > 0].copy()
+        im_tz_hex_df_recon['Date_Match'] = im_tz_hex_df_recon['Date'].dt.date
+        im_tz_hex_df_recon['Amount_Rounded'] = im_tz_hex_df_recon['Amount'].round(2)
+
+        # --- Extract currency from internal_df ---
+        extracted_currency = "TZS"
+        if 'CURRENCY' in im_tz_hex_df.columns and not im_tz_hex_df['CURRENCY'].empty:
+            unique_currencies = im_tz_hex_df['CURRENCY'].dropna().unique()
+            if unique_currencies.size > 0:
+                extracted_currency = str(unique_currencies[0])
+
+        # --- 3. Preprocessing for bank statements (I&M TZS Specific) ---
+        im_tz_bank_df.columns = im_tz_bank_df.columns.astype(str).str.strip()
+
+        # Essential columns for bank statements
+        bank_required_cols = ['Transaction Date', 'Value Date', 'Description', 
+                            'Tran Id', 'Cheque ID', 'Debit', 'Credit', 'Balance (TZS)']
+        if not all(col in im_tz_bank_df.columns for col in bank_required_cols):
+            missing_cols = [col for col in bank_required_cols if col not in im_tz_bank_df.columns]
+            st.error(f"Bank statement is missing essential columns: {', '.join(missing_cols)}.")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        # Rename columns for consistency
+        im_tz_bank_df = im_tz_bank_df.rename(columns={
+            'Transaction Date': 'Transaction_Date',
+            'Value Date': 'Value_Date',
+            'Tran Id': 'ID',
+            'Cheque ID': 'Cheque_ID',
+            'Balance (TZS)': 'Balance'
+        })
+
+        # Use Value Date if available, otherwise Transaction Date
+        im_tz_bank_df['Date'] = pd.to_datetime(im_tz_bank_df['Value_Date'], dayfirst=True, errors='coerce')
+        im_tz_bank_df['Date'] = im_tz_bank_df['Date'].fillna(
+            pd.to_datetime(im_tz_bank_df['Transaction_Date'], dayfirst=True, errors='coerce'))
+        im_tz_bank_df = im_tz_bank_df.dropna(subset=['Date']).copy()
+        
+        # Improved credit amount cleaning - handle text values and convert to numeric
+        im_tz_bank_df['Credit'] = im_tz_bank_df['Credit'].astype(str)
+        
+        # Remove any non-numeric characters except decimal point and negative sign
+        im_tz_bank_df['Credit'] = im_tz_bank_df['Credit'].str.replace(r'[^\d.-]', '', regex=True)
+        
+        # Convert to numeric, coercing errors to NaN
+        im_tz_bank_df['Credit'] = pd.to_numeric(im_tz_bank_df['Credit'], errors='coerce')
+        
+        # Fill NaN values with 0 (for text entries that couldn't be converted)
+        im_tz_bank_df['Credit'] = im_tz_bank_df['Credit'].fillna(0)
+
+        # Filter for positive credits
+        im_tz_bank_df_recon = im_tz_bank_df[im_tz_bank_df['Credit'] > 0].copy()
+        im_tz_bank_df_recon['Amount'] = im_tz_bank_df_recon['Credit']
+        im_tz_bank_df_recon = im_tz_bank_df_recon[['Date', 'Amount', 'Description', 'ID']].copy()
+        im_tz_bank_df_recon['Date_Match'] = im_tz_bank_df_recon['Date'].dt.date
+        im_tz_bank_df_recon['Amount_Rounded'] = im_tz_bank_df_recon['Amount'].round(2)
+
+        if im_tz_bank_df_recon.empty:
+            st.warning("No valid bank records found after filtering for positive credits.")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        # --- 4. Calculate Total Amounts and Discrepancy (before reconciliation) ---
+        total_internal_credits = im_tz_hex_df_recon['Amount'].sum()
+        total_bank_credits = im_tz_bank_df_recon['Amount'].sum()
+        discrepancy_amount = total_internal_credits - total_bank_credits
+
+        # --- 5. Reconciliation (Exact Match) ---
+        reconciled_df = pd.merge(
+            im_tz_hex_df_recon.assign(Source_Internal='Internal'),
+            im_tz_bank_df_recon.assign(Source_Bank='Bank'),
+            on=['Date_Match', 'Amount_Rounded'],
+            how='outer',
+            suffixes=('_Internal', '_Bank'))
+        
+        # Identify matched transactions
+        matched_exact = reconciled_df.dropna(subset=['Source_Internal', 'Source_Bank']).copy()
+        if not matched_exact.empty:
+            cols_to_select = [col for col in [
+                'Date_Internal', 'Amount_Internal', 'ID_Internal',
+                'Date_Bank', 'Amount_Bank', 'ID_Bank', 'Amount_Rounded'
+            ] if col in matched_exact.columns]
+            matched_transactions = matched_exact[cols_to_select].copy()
+
+        # Prepare initially unmatched records for tolerance matching
+        unmatched_internal_initial = reconciled_df[reconciled_df['Source_Bank'].isna()].copy()
+        if not unmatched_internal_initial.empty:
+            unmatched_internal_initial = unmatched_internal_initial[['Date_Internal', 'Amount_Internal', 'ID_Internal', 'Amount_Rounded']].rename(columns={
+                'Date_Internal': 'Date', 'Amount_Internal': 'Amount', 'ID_Internal': 'ID'
+            }).copy()
+            unmatched_internal_initial['Date'] = pd.to_datetime(unmatched_internal_initial['Date'])
+        else:
+            unmatched_internal_initial = create_empty_unmatched_df()
+            unmatched_internal_initial['Date'] = pd.to_datetime(unmatched_internal_initial['Date'])
+
+        unmatched_bank_initial = reconciled_df[reconciled_df['Source_Internal'].isna()].copy()
+        if not unmatched_bank_initial.empty:
+            unmatched_bank_initial = unmatched_bank_initial[['Date_Bank', 'Amount_Bank', 'ID_Bank', 'Amount_Rounded']].rename(columns={
+                'Date_Bank': 'Date', 'Amount_Bank': 'Amount', 'ID_Bank': 'ID'
+            }).copy()
+            unmatched_bank_initial['Date'] = pd.to_datetime(unmatched_bank_initial['Date'])
+        else:
+            unmatched_bank_initial = create_empty_unmatched_df()
+            unmatched_bank_initial['Date'] = pd.to_datetime(unmatched_bank_initial['Date'])
+
+        # --- 6. Reconciliation with Date Tolerance (3 days) ---
+        matched_with_tolerance, final_unmatched_internal, final_unmatched_bank = perform_date_tolerance_matching(
+            unmatched_internal_initial, unmatched_bank_initial, tolerance_days=3
+        )
+
+        # Combine all matched records
+        matched_total = pd.concat([matched_transactions, matched_with_tolerance], ignore_index=True)
+
+        # --- 7. Summary of Reconciliation ---
+        summary = {
+            "Total Internal Records (for recon)": len(im_tz_hex_df_recon),
+            "Total Bank Statement Records (for recon)": len(im_tz_bank_df_recon),
+            "Total Internal Credits (Original)": total_internal_credits,
+            "Total Bank Credits (Original)": total_bank_credits,
+            "Overall Discrepancy (Original)": discrepancy_amount,
+            "Total Matched Transactions (All Stages)": len(matched_total),
+            "Unmatched Internal Records (Final)": len(final_unmatched_internal),
+            "Unmatched Bank Records (Final)": len(final_unmatched_bank),
+            "Unmatched Internal Amount (Final)": final_unmatched_internal['Amount'].sum(),
+            "Unmatched Bank Amount (Final)": final_unmatched_bank['Amount'].sum(),
+            "Currency": extracted_currency,
+            "% accuracy": f"{(total_bank_credits / total_internal_credits * 100):.2f}%" if total_internal_credits != 0 else "N/A"
+        }
+
+    except Exception as e:
+        st.error(f"Error during I&M TZS reconciliation processing: {str(e)}")
+        return create_empty_matched_df(), create_empty_unmatched_df(), create_empty_unmatched_df(), {}
+
+    return matched_total, final_unmatched_internal, final_unmatched_bank, summary
+
+def reconcile_mpesa_tz(internal_file_obj, bank_file_obj):
+    """
+    Performs reconciliation for M-Pesa Tanzania.
+    Expects internal_file_obj (CSV/Excel) and bank_file_obj (CSV/Excel with header=5).
+    Filters for credit transactions where 'Paid In' > 0 and 'Opposite Party' contains 'Nala money'.
+    Returns matched, unmatched_internal, unmatched_bank dataframes and a summary dictionary.
+    """
+    # Initialize empty DataFrames with proper columns
+    matched_transactions = pd.DataFrame(columns=[
+        'Date_Internal', 'Amount_Internal', 'ID_Internal',
+        'Date_Bank', 'Amount_Bank', 'ID_Bank',
+        'Amount_Rounded'
+    ])
+    unmatched_internal = pd.DataFrame(columns=['Date', 'Amount', 'ID', 'Amount_Rounded'])
+    unmatched_bank = pd.DataFrame(columns=['Date', 'Amount', 'ID', 'Amount_Rounded'])
+    summary = {}
+
+    try:
+        # --- 1. Load the datasets ---
+        mpesa_hex_df = read_uploaded_file(internal_file_obj, header=0)
+        mpesa_bank_df = read_uploaded_file(bank_file_obj, header=5)  # Header at row 6 (0-indexed 5)
+        
+        if mpesa_hex_df is None or mpesa_bank_df is None:
+            st.error("One or both files could not be loaded for M-Pesa TZ.")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        # --- 2. Preprocessing for internal records ---
+        mpesa_hex_df.columns = mpesa_hex_df.columns.astype(str).str.strip()
+
+        # Essential columns for internal records
+        internal_required_cols = ['TRANSFER_DATE', 'AMOUNT']
+        if not all(col in mpesa_hex_df.columns for col in internal_required_cols):
+            missing_cols = [col for col in internal_required_cols if col not in mpesa_hex_df.columns]
+            st.error(f"Internal records are missing essential columns: {', '.join(missing_cols)}.")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        mpesa_hex_df = mpesa_hex_df.rename(columns={
+            'TRANSFER_DATE': 'Date',
+            'AMOUNT': 'Amount',
+            'COMMENT': 'Description',
+            'TRANSFER_ID': 'ID'
+        })
+
+        # Convert and filter dates
+        mpesa_hex_df['Date'] = pd.to_datetime(mpesa_hex_df['Date'], errors='coerce')
+        mpesa_hex_df = mpesa_hex_df.dropna(subset=['Date']).copy()
+
+        # Filter positive amounts and prepare for reconciliation
+        mpesa_hex_df_recon = mpesa_hex_df[mpesa_hex_df['Amount'] > 0].copy()
+        mpesa_hex_df_recon['Date_Match'] = mpesa_hex_df_recon['Date'].dt.date
+        mpesa_hex_df_recon['Amount_Rounded'] = mpesa_hex_df_recon['Amount'].round(2)
+
+        # --- Extract currency from internal_df ---
+        extracted_currency = "TZS"
+        if 'CURRENCY' in mpesa_hex_df.columns and not mpesa_hex_df['CURRENCY'].empty:
+            unique_currencies = mpesa_hex_df['CURRENCY'].dropna().unique()
+            if unique_currencies.size > 0:
+                extracted_currency = str(unique_currencies[0])
+
+        # --- 3. Preprocessing for bank statements (M-Pesa TZ Specific) ---
+        mpesa_bank_df.columns = mpesa_bank_df.columns.astype(str).str.strip()
+
+        # Essential columns for bank statements
+        bank_required_cols = ['Completion Time', 'Paid In', 'Opposite Party', 'Receipt No.']
+        if not all(col in mpesa_bank_df.columns for col in bank_required_cols):
+            missing_cols = [col for col in bank_required_cols if col not in mpesa_bank_df.columns]
+            st.error(f"Bank statement is missing essential columns: {', '.join(missing_cols)}.")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        mpesa_bank_df = mpesa_bank_df.rename(columns={
+            'Completion Time': 'Date',
+            'Paid In': 'Credit',
+            'Opposite Party': 'Description',
+            'Receipt No.': 'ID'
+        })
+
+        # Convert dates - M-Pesa format is typically DD-MM-YYYY HH:MM:SS
+        mpesa_bank_df['Date'] = pd.to_datetime(mpesa_bank_df['Date'], dayfirst=True, errors='coerce')
+        mpesa_bank_df = mpesa_bank_df.dropna(subset=['Date']).copy()
+
+        # Clean credit amounts - remove commas and convert to numeric
+        mpesa_bank_df['Credit'] = (
+            mpesa_bank_df['Credit'].astype(str)
+            .str.replace(',', '', regex=False)
+            .astype(float)
+            .fillna(0)
+        )
+
+        # M-Pesa TZ Specific Filters
+        # 1. Filter for positive credits
+        # 2. Filter for transactions containing 'Nala money' in Opposite Party
+        mpesa_bank_df_recon = mpesa_bank_df[
+            (mpesa_bank_df['Credit'] > 0) &
+            (mpesa_bank_df['Description'].astype(str).str.contains('Nala money', case=False, na=False))
+        ].copy()
+
+        if mpesa_bank_df_recon.empty:
+            st.warning("No valid bank records found after filtering for positive credits with 'Nala money' in description.")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        mpesa_bank_df_recon['Amount'] = mpesa_bank_df_recon['Credit']
+        mpesa_bank_df_recon = mpesa_bank_df_recon[['Date', 'Amount', 'Description', 'ID']].copy()
+        mpesa_bank_df_recon['Date_Match'] = mpesa_bank_df_recon['Date'].dt.date
+        mpesa_bank_df_recon['Amount_Rounded'] = mpesa_bank_df_recon['Amount'].round(2)
+
+        # --- 4. Calculate Total Amounts and Discrepancy (before reconciliation) ---
+        total_internal_credits = mpesa_hex_df_recon['Amount'].sum()
+        total_bank_credits = mpesa_bank_df_recon['Amount'].sum()
+        discrepancy_amount = total_internal_credits - total_bank_credits
+
+        # --- 5. Reconciliation (Exact Match) ---
+        reconciled_df = pd.merge(
+            mpesa_hex_df_recon.assign(Source_Internal='Internal'),
+            mpesa_bank_df_recon.assign(Source_Bank='Bank'),
+            on=['Date_Match', 'Amount_Rounded'],
+            how='outer',
+            suffixes=('_Internal', '_Bank')
+        )
+
+        # Identify matched transactions
+        matched_exact = reconciled_df.dropna(subset=['Source_Internal', 'Source_Bank']).copy()
+        if not matched_exact.empty:
+            cols_to_select = [col for col in [
+                'Date_Internal', 'Amount_Internal', 'ID_Internal',
+                'Date_Bank', 'Amount_Bank', 'ID_Bank', 'Amount_Rounded'
+            ] if col in matched_exact.columns]
+            matched_transactions = matched_exact[cols_to_select].copy()
+
+        # Prepare initially unmatched records for tolerance matching
+        unmatched_internal_initial = reconciled_df[reconciled_df['Source_Bank'].isna()].copy()
+        if not unmatched_internal_initial.empty:
+            unmatched_internal_initial = unmatched_internal_initial[['Date_Internal', 'Amount_Internal', 'ID_Internal', 'Amount_Rounded']].rename(columns={
+                'Date_Internal': 'Date', 'Amount_Internal': 'Amount', 'ID_Internal': 'ID'
+            }).copy()
+            unmatched_internal_initial['Date'] = pd.to_datetime(unmatched_internal_initial['Date'])
+        else:
+            unmatched_internal_initial = pd.DataFrame(columns=['Date', 'Amount', 'ID', 'Amount_Rounded'])
+            unmatched_internal_initial['Date'] = pd.to_datetime(unmatched_internal_initial['Date'])
+
+        unmatched_bank_initial = reconciled_df[reconciled_df['Source_Internal'].isna()].copy()
+        if not unmatched_bank_initial.empty:
+            unmatched_bank_initial = unmatched_bank_initial[['Date_Bank', 'Amount_Bank', 'ID_Bank', 'Amount_Rounded']].rename(columns={
+                'Date_Bank': 'Date', 'Amount_Bank': 'Amount', 'ID_Bank': 'ID'
+            }).copy()
+            unmatched_bank_initial['Date'] = pd.to_datetime(unmatched_bank_initial['Date'])
+        else:
+            unmatched_bank_initial = pd.DataFrame(columns=['Date', 'Amount', 'ID', 'Amount_Rounded'])
+            unmatched_bank_initial['Date'] = pd.to_datetime(unmatched_bank_initial['Date'])
+
+        # --- 6. Reconciliation with Date Tolerance (3 days) ---
+        matched_with_tolerance, final_unmatched_internal, final_unmatched_bank = perform_date_tolerance_matching(
+            unmatched_internal_initial, unmatched_bank_initial, tolerance_days=3
+        )
+
+        # Combine all matched records
+        matched_total = pd.concat([matched_transactions, matched_with_tolerance], ignore_index=True)
+
+        # --- 7. Summary of Reconciliation ---
+        total_matched_amount_internal = matched_total['Amount_Internal'].sum() if 'Amount_Internal' in matched_total.columns else 0
+        total_matched_amount_bank = matched_total['Amount_Bank'].sum() if 'Amount_Bank' in matched_total.columns else 0
+        remaining_unmatched_internal_amount = final_unmatched_internal['Amount'].sum() if 'Amount' in final_unmatched_internal.columns else 0
+        remaining_unmatched_bank_amount = final_unmatched_bank['Amount'].sum() if 'Amount' in final_unmatched_bank.columns else 0
+
+        summary = {
+            "Total Internal Records (for recon)": len(mpesa_hex_df_recon),
+            "Total Bank Statement Records (for recon)": len(mpesa_bank_df_recon),
+            "Total Internal Credits (Original)": total_internal_credits,
+            "Total Bank Credits (Original)": total_bank_credits,
+            "Overall Discrepancy (Original)": discrepancy_amount,
+            "Total Matched Transactions (All Stages)": len(matched_total),
+            "Total Matched Amount (Internal)": total_matched_amount_internal,
+            "Total Matched Amount (Bank)": total_matched_amount_bank,
+            "Unmatched Internal Records (Final)": len(final_unmatched_internal),
+            "Unmatched Bank Records (Final)": len(final_unmatched_bank),
+            "Unmatched Internal Amount (Final)": remaining_unmatched_internal_amount,
+            "Unmatched Bank Amount (Final)": remaining_unmatched_bank_amount,
+            "Currency": extracted_currency,
+            "% accuracy": f"{(total_bank_credits / total_internal_credits * 100):.2f}%" if total_internal_credits != 0 else "N/A"
+        }
+
+    except Exception as e:
+        st.error(f"Error during M-Pesa TZ reconciliation processing: {str(e)}")
+        return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+    return matched_total, final_unmatched_internal, final_unmatched_bank, summary
+
 def reconcile_selcom_tz(internal_file_obj, bank_file_obj):
     """
     Performs reconciliation for Selcom TZ.
@@ -4892,13 +5254,50 @@ RECONCILIATION_FUNCTIONS["NCBA USD"] = reconcile_ncba_usd
 # TZ
 RECONCILIATION_FUNCTIONS["Selcom TZ"] = reconcile_selcom_tz
 RECONCILIATION_FUNCTIONS["NMB"] = reconcile_nmb
+#RECONCILIATION_FUNCTIONS["UBA"] = reconcile_uba
 RECONCILIATION_FUNCTIONS["Equity TZ"] = reconcile_equity_tz
 RECONCILIATION_FUNCTIONS["Cellulant TZ"] = reconcile_cellulant_tz
+RECONCILIATION_FUNCTIONS["Mpesa TZ"] = reconcile_mpesa_tz
+#RECONCILIATION_FUNCTIONS["CRDB TZS"] = reconcile_crdb_tzs
+#RECONCILIATION_FUNCTIONS["CRDB USD"] = reconcile_crdb_usd
+RECONCILIATION_FUNCTIONS["I&M TZS"] = reconcile_i_and_m_tzs
+#RECONCILIATION_FUNCTIONS["I&M USD (TZ)"] = reconcile_i_and_m_usd_tz
+
+#UG
+#RECONCILIATION_FUNCTIONS["Flutterwave Ug"] = reconcile_flutterwave_ug
+#RECONCILIATION_FUNCTIONS["Pegasus"] = reconcile_pegasus
+#RECONCILIATION_FUNCTIONS["Equity UGX"] = reconcile_equity_ugx
+#RECONCILIATION_FUNCTIONS["Equity Ug USD"] = reconcile_equity_ug_usd
+
+#Ghana
+#RECONCILIATION_FUNCTIONS["Flutterwave GHS"] = reconcile_flutterwave_ghs
+#RECONCILIATION_FUNCTIONS["Zeepay"] = reconcile_zeepay
+#RECONCILIATION_FUNCTIONS["Fincra GHS"] = reconcile_efincra_ghs
+
+#SEN
+#RECONCILIATION_FUNCTIONS["Aza Finance XOF"] = reconcile_aza_xof
+#RECONCILIATION_FUNCTIONS["Hub2 IC"] = reconcile_hub2_ic
+#RECONCILIATION_FUNCTIONS["Hub2 SEN"] = reconcile_hub2_sen
+
+#RWF
+#RECONCILIATION_FUNCTIONS["Flutterwave RWF"] = reconcile_flutterwave_rwf
+#RECONCILIATION_FUNCTIONS["Kremit"] = reconcile_kremit
+#RECONCILIATION_FUNCTIONS["I&M RWF"] = reconcile_i_and_m_rwf
+#RECONCILIATION_FUNCTIONS["I&M USD (RWF)"] = reconcile_i_and_m_usd_rwf
+
+#CAM
+#RECONCILIATION_FUNCTIONS["Aza Finance XAF"] = reconcile_aza_xaf
+#RECONCILIATION_FUNCTIONS["Hub2 XAF"] = reconcile_hub2_xaf
+#RECONCILIATION_FUNCTIONS["Peex"] = reconcile_peex
+#RECONCILIATION_FUNCTIONS["Pawapay"] = reconcile_pawapay
 
 # NGN
 RECONCILIATION_FUNCTIONS["Fincra NGN"] = reconcile_fincra
 RECONCILIATION_FUNCTIONS["Flutterwave NGN"] = reconcile_flutterwave_ngn
 RECONCILIATION_FUNCTIONS["Moniepoint"] = reconcile_moniepoint
+RECONCILIATION_FUNCTIONS["Verto"] = reconcile_verto
+RECONCILIATION_FUNCTIONS["Cellulant NGN"] = reconcile_cellulant_ngn
+RECONCILIATION_FUNCTIONS["Zenith"] = reconcile_zenith
 
 # --- Streamlit UI Page Functions ---
 def homepage():
