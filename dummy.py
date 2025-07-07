@@ -3835,6 +3835,188 @@ def reconcile_zeepay(internal_file_obj, bank_file_obj):
 
     return matched_total, final_unmatched_internal, final_unmatched_bank, summary
 
+def reconcile_flutterwave_ghs(internal_file_obj, bank_file_obj):
+    """
+    Performs reconciliation for Flutterwave Ghana (GHS).
+    Expects internal_file_obj (CSV/Excel) and bank_file_obj (CSV/Excel with header=0).
+    Filters bank records for type='C' (credits) and amount > 0.
+    Returns matched, unmatched_internal, unmatched_bank dataframes and a summary dictionary.
+    """
+    # Initialize empty DataFrames with proper columns
+    matched_transactions = pd.DataFrame(columns=[
+        'Date_Internal', 'Amount_Internal', 'ID_Internal',
+        'Date_Bank', 'Amount_Bank', 'ID_Bank',
+        'Amount_Rounded'
+    ])
+    unmatched_internal = pd.DataFrame(columns=['Date', 'Amount', 'ID', 'Amount_Rounded'])
+    unmatched_bank = pd.DataFrame(columns=['Date', 'Amount', 'ID', 'Amount_Rounded'])
+    summary = {}
+
+    try:
+        # --- 1. Load the datasets ---
+        flutterwave_hex_df = read_uploaded_file(internal_file_obj, header=0)
+        flutterwave_bank_df = read_uploaded_file(bank_file_obj, header=0)
+        
+        if flutterwave_hex_df is None or flutterwave_bank_df is None:
+            st.error("One or both files could not be loaded for Flutterwave GHS.")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        # --- 2. Preprocessing for internal records ---
+        flutterwave_hex_df.columns = flutterwave_hex_df.columns.astype(str).str.strip()
+
+        # Essential columns for internal records
+        internal_required_cols = ['TRANSFER_DATE', 'AMOUNT']
+        if not all(col in flutterwave_hex_df.columns for col in internal_required_cols):
+            missing_cols = [col for col in internal_required_cols if col not in flutterwave_hex_df.columns]
+            st.error(f"Internal records are missing essential columns: {', '.join(missing_cols)}.")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        flutterwave_hex_df = flutterwave_hex_df.rename(columns={
+            'TRANSFER_DATE': 'Date',
+            'AMOUNT': 'Amount',
+            'COMMENT': 'Description',
+            'TRANSFER_ID': 'ID'
+        })
+
+        # Convert and filter dates
+        flutterwave_hex_df['Date'] = pd.to_datetime(flutterwave_hex_df['Date'], errors='coerce')
+        flutterwave_hex_df = flutterwave_hex_df.dropna(subset=['Date']).copy()
+
+        # Filter positive amounts and prepare for reconciliation
+        flutterwave_hex_df_recon = flutterwave_hex_df[flutterwave_hex_df['Amount'] > 0].copy()
+        flutterwave_hex_df_recon['Date_Match'] = flutterwave_hex_df_recon['Date'].dt.date
+        flutterwave_hex_df_recon['Amount_Rounded'] = flutterwave_hex_df_recon['Amount'].round(2)
+
+        # --- Extract currency from internal_df ---
+        extracted_currency = "GHS"
+        if 'CURRENCY' in flutterwave_hex_df.columns and not flutterwave_hex_df['CURRENCY'].empty:
+            unique_currencies = flutterwave_hex_df['CURRENCY'].dropna().unique()
+            if unique_currencies.size > 0:
+                extracted_currency = str(unique_currencies[0])
+
+        # --- 3. Preprocessing for bank statements (Flutterwave GHS Specific) ---
+        flutterwave_bank_df.columns = flutterwave_bank_df.columns.astype(str).str.strip()
+
+        # Essential columns for bank statements
+        bank_required_cols = ['type', 'amount', 'date', 'reference']
+        if not all(col in flutterwave_bank_df.columns for col in bank_required_cols):
+            missing_cols = [col for col in bank_required_cols if col not in flutterwave_bank_df.columns]
+            st.error(f"Bank statement is missing essential columns: {', '.join(missing_cols)}.")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        # Filter for credit transactions (type='C') and positive amounts
+        flutterwave_bank_df = flutterwave_bank_df[
+            (flutterwave_bank_df['type'].astype(str).str.upper() == 'C') &
+            (pd.to_numeric(flutterwave_bank_df['amount'], errors='coerce') > 0)
+        ].copy()
+
+        # Clean and convert amount
+        flutterwave_bank_df['amount'] = pd.to_numeric(
+            flutterwave_bank_df['amount'].astype(str).str.replace(',', '', regex=False),
+            errors='coerce'
+        ).fillna(0)
+
+        # Convert dates
+        flutterwave_bank_df['date'] = pd.to_datetime(flutterwave_bank_df['date'], errors='coerce')
+        flutterwave_bank_df = flutterwave_bank_df.dropna(subset=['date']).copy()
+
+        # Prepare bank recon dataframe
+        flutterwave_bank_df_recon = flutterwave_bank_df.rename(columns={
+            'date': 'Date',
+            'amount': 'Amount',
+            'reference': 'ID',
+            'narration': 'Description'
+        }).copy()
+
+        flutterwave_bank_df_recon = flutterwave_bank_df_recon[['Date', 'Amount', 'Description', 'ID']]
+        flutterwave_bank_df_recon['Date_Match'] = flutterwave_bank_df_recon['Date'].dt.date
+        flutterwave_bank_df_recon['Amount_Rounded'] = flutterwave_bank_df_recon['Amount'].round(2)
+
+        if flutterwave_bank_df_recon.empty:
+            st.warning("No valid bank records found after filtering for type='C' and amount>0.")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        # --- 4. Calculate Total Amounts and Discrepancy (before reconciliation) ---
+        total_internal_credits = flutterwave_hex_df_recon['Amount'].sum()
+        total_bank_credits = flutterwave_bank_df_recon['Amount'].sum()
+        discrepancy_amount = total_internal_credits - total_bank_credits
+
+        # --- 5. Reconciliation (Exact Match) ---
+        reconciled_df = pd.merge(
+            flutterwave_hex_df_recon.assign(Source_Internal='Internal'),
+            flutterwave_bank_df_recon.assign(Source_Bank='Bank'),
+            on=['Date_Match', 'Amount_Rounded'],
+            how='outer',
+            suffixes=('_Internal', '_Bank')
+        )
+
+        # Identify matched transactions
+        matched_exact = reconciled_df.dropna(subset=['Source_Internal', 'Source_Bank']).copy()
+        if not matched_exact.empty:
+            cols_to_select = [col for col in [
+                'Date_Internal', 'Amount_Internal', 'ID_Internal',
+                'Date_Bank', 'Amount_Bank', 'ID_Bank', 'Amount_Rounded'
+            ] if col in matched_exact.columns]
+            matched_transactions = matched_exact[cols_to_select].copy()
+
+        # Prepare initially unmatched records for tolerance matching
+        unmatched_internal_initial = reconciled_df[reconciled_df['Source_Bank'].isna()].copy()
+        if not unmatched_internal_initial.empty:
+            unmatched_internal_initial = unmatched_internal_initial[['Date_Internal', 'Amount_Internal', 'ID_Internal', 'Amount_Rounded']].rename(columns={
+                'Date_Internal': 'Date', 'Amount_Internal': 'Amount', 'ID_Internal': 'ID'
+            }).copy()
+            unmatched_internal_initial['Date'] = pd.to_datetime(unmatched_internal_initial['Date'])
+        else:
+            unmatched_internal_initial = pd.DataFrame(columns=['Date', 'Amount', 'ID', 'Amount_Rounded'])
+            unmatched_internal_initial['Date'] = pd.to_datetime(unmatched_internal_initial['Date'])
+
+        unmatched_bank_initial = reconciled_df[reconciled_df['Source_Internal'].isna()].copy()
+        if not unmatched_bank_initial.empty:
+            unmatched_bank_initial = unmatched_bank_initial[['Date_Bank', 'Amount_Bank', 'ID_Bank', 'Amount_Rounded']].rename(columns={
+                'Date_Bank': 'Date', 'Amount_Bank': 'Amount', 'ID_Bank': 'ID'
+            }).copy()
+            unmatched_bank_initial['Date'] = pd.to_datetime(unmatched_bank_initial['Date'])
+        else:
+            unmatched_bank_initial = pd.DataFrame(columns=['Date', 'Amount', 'ID', 'Amount_Rounded'])
+            unmatched_bank_initial['Date'] = pd.to_datetime(unmatched_bank_initial['Date'])
+
+        # --- 6. Reconciliation with Date Tolerance (3 days) ---
+        matched_with_tolerance, final_unmatched_internal, final_unmatched_bank = perform_date_tolerance_matching(
+            unmatched_internal_initial, unmatched_bank_initial, tolerance_days=3
+        )
+
+        # Combine all matched records
+        matched_total = pd.concat([matched_transactions, matched_with_tolerance], ignore_index=True)
+
+        # --- 7. Summary of Reconciliation ---
+        total_matched_amount_internal = matched_total['Amount_Internal'].sum() if 'Amount_Internal' in matched_total.columns else 0
+        total_matched_amount_bank = matched_total['Amount_Bank'].sum() if 'Amount_Bank' in matched_total.columns else 0
+        remaining_unmatched_internal_amount = final_unmatched_internal['Amount'].sum() if 'Amount' in final_unmatched_internal.columns else 0
+        remaining_unmatched_bank_amount = final_unmatched_bank['Amount'].sum() if 'Amount' in final_unmatched_bank.columns else 0
+
+        summary = {
+            "Total Internal Records (for recon)": len(flutterwave_hex_df_recon),
+            "Total Bank Statement Records (for recon)": len(flutterwave_bank_df_recon),
+            "Total Internal Credits (Original)": total_internal_credits,
+            "Total Bank Credits (Original)": total_bank_credits,
+            "Overall Discrepancy (Original)": discrepancy_amount,
+            "Total Matched Transactions (All Stages)": len(matched_total),
+            "Total Matched Amount (Internal)": total_matched_amount_internal,
+            "Total Matched Amount (Bank)": total_matched_amount_bank,
+            "Unmatched Internal Records (Final)": len(final_unmatched_internal),
+            "Unmatched Bank Records (Final)": len(final_unmatched_bank),
+            "Unmatched Internal Amount (Final)": remaining_unmatched_internal_amount,
+            "Unmatched Bank Amount (Final)": remaining_unmatched_bank_amount,
+            "Currency": extracted_currency,
+            "% accuracy": f"{(total_bank_credits / total_internal_credits * 100):.2f}%" if total_internal_credits != 0 else "N/A"
+        }
+
+    except Exception as e:
+        st.error(f"Error during Flutterwave GHS reconciliation processing: {str(e)}")
+        return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+    return matched_total, final_unmatched_internal, final_unmatched_bank, summary
+
 def reconcile_cellulant_ngn(internal_file_obj, bank_file_obj):
     """
     Performs reconciliation for Cellulant Nigeria (NGN).
@@ -5433,7 +5615,7 @@ RECONCILIATION_FUNCTIONS["I&M TZS"] = reconcile_i_and_m_tzs
 #RECONCILIATION_FUNCTIONS["Equity Ug USD"] = reconcile_equity_ug_usd
 
 #Ghana
-#RECONCILIATION_FUNCTIONS["Flutterwave GHS"] = reconcile_flutterwave_ghs
+RECONCILIATION_FUNCTIONS["Flutterwave GHS"] = reconcile_flutterwave_ghs
 RECONCILIATION_FUNCTIONS["Zeepay"] = reconcile_zeepay
 #RECONCILIATION_FUNCTIONS["Fincra GHS"] = reconcile_efincra_ghs
 
