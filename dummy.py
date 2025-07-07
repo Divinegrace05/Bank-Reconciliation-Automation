@@ -697,13 +697,13 @@ def reconcile_zamupay(internal_file_obj, bank_file_obj):
     """
     Performs comprehensive reconciliation for Zamupay (PYCS).
     Incorporates exact match, 3-day date tolerance, and split transaction aggregation.
-    Expects internal_file_obj (CSV) and bank_file_obj (CSV with header=2).
+    Expects internal_file_obj (CSV) and bank_file_obj (CSV).
     Returns matched_total, final_unmatched_internal, final_unmatched_bank dataframes,
     and a summary dictionary.
     """
     try:
         zamupay_internal_df = read_uploaded_file(internal_file_obj, header=0)
-        zamupay_bank_df = read_uploaded_file(bank_file_obj, header=2)  # Changed to header=2
+        zamupay_bank_df = read_uploaded_file(bank_file_obj, header=0)
 
         # --- Extract currency from internal_df ---
         extracted_currency = "N/A" # Default in case column is missing or empty
@@ -743,39 +743,34 @@ def reconcile_zamupay(internal_file_obj, bank_file_obj):
     zamupay_internal_df_recon = zamupay_internal_df[zamupay_internal_df['Amount'] > 0].copy()
     zamupay_internal_df_recon.loc[:, 'Date_Match'] = zamupay_internal_df_recon['Date'].dt.date
 
-
-    # --- 2. Preprocessing for Zamupay Bank Statements (New Format) ---
+    # --- 2. Preprocessing for Zamupay Bank Statements ---
     zamupay_bank_df.columns = zamupay_bank_df.columns.astype(str).str.strip()
 
     # Essential columns check for bank statements
-    bank_required_cols = ['Value Date', 'Amount', 'Transaction Type']
+    bank_required_cols = ['Tran. Date', 'Credit Amt.', 'Particulars']
     if not all(col in zamupay_bank_df.columns for col in bank_required_cols):
         missing_cols = [col for col in bank_required_cols if col not in zamupay_bank_df.columns]
         st.error(f"Bank statement (Zamupay) is missing essential columns: {', '.join(missing_cols)}.")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}
 
-    # Filter for Credit transactions only
-    zamupay_bank_df = zamupay_bank_df[
-        zamupay_bank_df['Transaction Type'].astype(str).str.upper() == 'CREDIT'
-    ].copy()
-
     zamupay_bank_df = zamupay_bank_df.rename(columns={
-        'Value Date': 'Date',
-        'Amount': 'Amount',
-        'Reference': 'Description'
+        'Tran. Date': 'Date',
+        'Credit Amt.': 'Amount',
+        'Particulars': 'Description'
     })
-    
     zamupay_bank_df['Date'] = pd.to_datetime(zamupay_bank_df['Date'], errors='coerce')
     zamupay_bank_df = zamupay_bank_df.dropna(subset=['Date']).copy()
 
-    # Clean amount column - remove commas and convert to float
-    zamupay_bank_df['Amount'] = (
-        zamupay_bank_df['Amount'].astype(str)
-        .str.replace(',', '', regex=False)
-        .astype(float)
-    )
+    zamupay_bank_df['Amount'] = zamupay_bank_df['Amount'].astype(str).str.replace(',', '', regex=False).astype(float)
 
-    # Filter positive amounts
+    # --- Filter out records with "REVERSAL" in 'Description' ---
+    if 'Description' in zamupay_bank_df.columns:
+        zamupay_bank_df = zamupay_bank_df[
+            ~zamupay_bank_df['Description'].astype(str).str.contains('REVERSAL', case=False, na=False)
+        ].copy()
+    else:
+        st.warning("Warning: 'Description' (Particulars) column not found in bank statement. Skipping 'REVERSAL' filter.")
+
     zamupay_bank_df_recon = zamupay_bank_df[zamupay_bank_df['Amount'] > 0].copy()
     zamupay_bank_df_recon.loc[:, 'Date_Match'] = zamupay_bank_df_recon['Date'].dt.date
 
@@ -795,7 +790,6 @@ def reconcile_zamupay(internal_file_obj, bank_file_obj):
         how='outer',
         suffixes=('_Internal', '_Bank')
     )
-
     matched_zamupay_transactions_exact = reconciled_zamupay_df_exact.dropna(subset=['Source_Internal', 'Source_Bank']).copy()
 
     # Prepare initially unmatched internal transactions for the next stage (Date Tolerance)
@@ -848,7 +842,6 @@ def reconcile_zamupay(internal_file_obj, bank_file_obj):
 
     bank_indices_matched_by_agg = []
     internal_indices_matched_by_agg = []
-
     current_unmatched_internal_agg = unmatched_internal_after_tolerance.copy()
 
     if not current_unmatched_internal_agg.empty and not temp_unmatched_bank_for_agg.empty:
@@ -869,12 +862,10 @@ def reconcile_zamupay(internal_file_obj, bank_file_obj):
 
             # Group these potential bank records by date and sum their amounts
             grouped_bank_sums = potential_bank_records_in_range.groupby('Date_DT')['Amount_Rounded'].sum().reset_index()
-
             # Find if any aggregated sum matches the internal amount
             matched_agg_bank_entry = grouped_bank_sums[
                 grouped_bank_sums['Amount_Rounded'].round(2) == internal_amount
             ]
-
             if not matched_agg_bank_entry.empty:
                 # Take the first aggregated match
                 agg_date_dt = matched_agg_bank_entry.iloc[0]['Date_DT']
@@ -884,7 +875,6 @@ def reconcile_zamupay(internal_file_obj, bank_file_obj):
                 contributing_bank_records = temp_unmatched_bank_for_agg[
                     (temp_unmatched_bank_for_agg['Date_DT'] == agg_date_dt)
                 ]
-
                 # Double check if the sum of these contributing records still equals the internal amount
                 if contributing_bank_records['Amount_Rounded'].sum().round(2) == internal_amount:
                     new_matched_row = {
@@ -907,7 +897,6 @@ def reconcile_zamupay(internal_file_obj, bank_file_obj):
                     bank_indices_matched_by_agg.extend(contributing_bank_records.index.tolist())
                     # Remove them from temp_unmatched_bank_for_agg to avoid re-matching
                     temp_unmatched_bank_for_agg = temp_unmatched_bank_for_agg.drop(contributing_bank_records.index)
-
     matched_zamupay_by_aggregation = pd.DataFrame(matched_by_aggregation_list)
 
     # Remove matched records from the current unmatched dataframes
@@ -928,7 +917,6 @@ def reconcile_zamupay(internal_file_obj, bank_file_obj):
             'Date_Internal', 'Amount_Internal', 'Date_Match_Internal', 'Source_Internal',
             'Date_Bank', 'Amount_Bank', 'Date_Match_Bank', 'Source_Bank', 'Amount_Rounded'
         ])
-
     total_matched_amount_internal = matched_total['Amount_Internal'].sum() if 'Amount_Internal' in matched_total.columns else 0
     total_matched_amount_bank = matched_total['Amount_Bank'].sum() if 'Amount_Bank' in matched_total.columns else 0
     remaining_unmatched_internal_amount = final_unmatched_zamupay_internal['Amount'].sum() if 'Amount' in final_unmatched_zamupay_internal.columns else 0
@@ -947,8 +935,7 @@ def reconcile_zamupay(internal_file_obj, bank_file_obj):
         "Unmatched Bank Records (Final)": len(final_unmatched_zamupay_bank),
         "Unmatched Internal Amount (Final)": remaining_unmatched_internal_amount,
         "Unmatched Bank Amount (Final)": remaining_unmatched_bank_amount,
-        "Currency": extracted_currency,
-        "% accuracy": f"{(total_bank_credits / total_internal_credits * 100):.2f}%" if total_internal_credits != 0 else "N/A"
+        "Currency": extracted_currency
     }
     # Return the aggregated matched dataframe, final unmatched dataframes, and the summary
     return matched_total, final_unmatched_zamupay_internal, final_unmatched_zamupay_bank, summary
@@ -3672,6 +3659,182 @@ def reconcile_flutterwave_ug(internal_file_obj, bank_file_obj):
     # --- 10. Return the results ---
     return final_matched_total, final_unmatched_internal, final_unmatched_bank, summary
 
+def reconcile_zeepay(internal_file_obj, bank_file_obj):
+    """
+    Performs reconciliation for Zeepay Ghana.
+    Expects internal_file_obj (CSV/Excel) and bank_file_obj (CSV/Excel with header=0).
+    Filters for records where 'Total Receipts' > 0.
+    Returns matched, unmatched_internal, unmatched_bank dataframes and a summary dictionary.
+    """
+    # Initialize empty DataFrames with proper columns
+    matched_transactions = pd.DataFrame(columns=[
+        'Date_Internal', 'Amount_Internal', 'ID_Internal',
+        'Date_Bank', 'Amount_Bank', 'ID_Bank',
+        'Amount_Rounded'
+    ])
+    unmatched_internal = pd.DataFrame(columns=['Date', 'Amount', 'ID', 'Amount_Rounded'])
+    unmatched_bank = pd.DataFrame(columns=['Date', 'Amount', 'ID', 'Amount_Rounded'])
+    summary = {}
+
+    try:
+        # --- 1. Load the datasets ---
+        zeepay_hex_df = read_uploaded_file(internal_file_obj, header=0)
+        zeepay_bank_df = read_uploaded_file(bank_file_obj, header=0)
+        
+        if zeepay_hex_df is None or zeepay_bank_df is None:
+            st.error("One or both files could not be loaded for Zeepay.")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        # --- 2. Preprocessing for internal records ---
+        zeepay_hex_df.columns = zeepay_hex_df.columns.astype(str).str.strip()
+
+        # Essential columns for internal records
+        internal_required_cols = ['TRANSFER_DATE', 'AMOUNT']
+        if not all(col in zeepay_hex_df.columns for col in internal_required_cols):
+            missing_cols = [col for col in internal_required_cols if col not in zeepay_hex_df.columns]
+            st.error(f"Internal records are missing essential columns: {', '.join(missing_cols)}.")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        zeepay_hex_df = zeepay_hex_df.rename(columns={
+            'TRANSFER_DATE': 'Date',
+            'AMOUNT': 'Amount',
+            'COMMENT': 'Description',
+            'TRANSFER_ID': 'ID'
+        })
+
+        # Convert and filter dates
+        zeepay_hex_df['Date'] = pd.to_datetime(zeepay_hex_df['Date'], errors='coerce')
+        zeepay_hex_df = zeepay_hex_df.dropna(subset=['Date']).copy()
+
+        # Filter positive amounts and prepare for reconciliation
+        zeepay_hex_df_recon = zeepay_hex_df[zeepay_hex_df['Amount'] > 0].copy()
+        zeepay_hex_df_recon['Date_Match'] = zeepay_hex_df_recon['Date'].dt.date
+        zeepay_hex_df_recon['Amount_Rounded'] = zeepay_hex_df_recon['Amount'].round(2)
+
+        # --- Extract currency from internal_df ---
+        extracted_currency = "GHS"  # Default for Zeepay Ghana
+        if 'CURRENCY' in zeepay_hex_df.columns and not zeepay_hex_df['CURRENCY'].empty:
+            unique_currencies = zeepay_hex_df['CURRENCY'].dropna().unique()
+            if unique_currencies.size > 0:
+                extracted_currency = str(unique_currencies[0])
+
+        # --- 3. Preprocessing for bank statements (Zeepay Specific) ---
+        zeepay_bank_df.columns = zeepay_bank_df.columns.astype(str).str.strip()
+
+        # Essential columns for bank statements
+        bank_required_cols = ['Date', 'Total Receipts']
+        if not all(col in zeepay_bank_df.columns for col in bank_required_cols):
+            missing_cols = [col for col in bank_required_cols if col not in zeepay_bank_df.columns]
+            st.error(f"Bank statement is missing essential columns: {', '.join(missing_cols)}.")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        # Clean and convert 'Total Receipts' to numeric
+        zeepay_bank_df['Total Receipts'] = (
+            zeepay_bank_df['Total Receipts'].astype(str)
+            .str.replace(',', '', regex=False)
+            .astype(float)
+            .fillna(0)
+        )
+
+        # Filter for positive receipts
+        zeepay_bank_df_recon = zeepay_bank_df[zeepay_bank_df['Total Receipts'] > 0].copy()
+        
+        # Convert dates
+        zeepay_bank_df_recon['Date'] = pd.to_datetime(zeepay_bank_df_recon['Date'], errors='coerce')
+        zeepay_bank_df_recon = zeepay_bank_df_recon.dropna(subset=['Date']).copy()
+
+        # Prepare for reconciliation
+        zeepay_bank_df_recon['Amount'] = zeepay_bank_df_recon['Total Receipts']
+        zeepay_bank_df_recon = zeepay_bank_df_recon[['Date', 'Amount', 'Description', 'Bank & Txn Ref']].copy()
+        zeepay_bank_df_recon = zeepay_bank_df_recon.rename(columns={'Bank & Txn Ref': 'ID'})
+        zeepay_bank_df_recon['Date_Match'] = zeepay_bank_df_recon['Date'].dt.date
+        zeepay_bank_df_recon['Amount_Rounded'] = zeepay_bank_df_recon['Amount'].round(2)
+
+        if zeepay_bank_df_recon.empty:
+            st.warning("No valid bank records found after filtering for positive receipts.")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        # --- 4. Calculate Total Amounts and Discrepancy (before reconciliation) ---
+        total_internal_credits = zeepay_hex_df_recon['Amount'].sum()
+        total_bank_credits = zeepay_bank_df_recon['Amount'].sum()
+        discrepancy_amount = total_internal_credits - total_bank_credits
+
+        # --- 5. Reconciliation (Exact Match) ---
+        reconciled_df = pd.merge(
+            zeepay_hex_df_recon.assign(Source_Internal='Internal'),
+            zeepay_bank_df_recon.assign(Source_Bank='Bank'),
+            on=['Date_Match', 'Amount_Rounded'],
+            how='outer',
+            suffixes=('_Internal', '_Bank')
+        )
+
+        # Identify matched transactions
+        matched_exact = reconciled_df.dropna(subset=['Source_Internal', 'Source_Bank']).copy()
+        if not matched_exact.empty:
+            cols_to_select = [col for col in [
+                'Date_Internal', 'Amount_Internal', 'ID_Internal',
+                'Date_Bank', 'Amount_Bank', 'ID_Bank', 'Amount_Rounded'
+            ] if col in matched_exact.columns]
+            matched_transactions = matched_exact[cols_to_select].copy()
+
+        # Prepare initially unmatched records for tolerance matching
+        unmatched_internal_initial = reconciled_df[reconciled_df['Source_Bank'].isna()].copy()
+        if not unmatched_internal_initial.empty:
+            unmatched_internal_initial = unmatched_internal_initial[['Date_Internal', 'Amount_Internal', 'ID_Internal', 'Amount_Rounded']].rename(columns={
+                'Date_Internal': 'Date', 'Amount_Internal': 'Amount', 'ID_Internal': 'ID'
+            }).copy()
+            unmatched_internal_initial['Date'] = pd.to_datetime(unmatched_internal_initial['Date'])
+        else:
+            unmatched_internal_initial = pd.DataFrame(columns=['Date', 'Amount', 'ID', 'Amount_Rounded'])
+            unmatched_internal_initial['Date'] = pd.to_datetime(unmatched_internal_initial['Date'])
+
+        unmatched_bank_initial = reconciled_df[reconciled_df['Source_Internal'].isna()].copy()
+        if not unmatched_bank_initial.empty:
+            unmatched_bank_initial = unmatched_bank_initial[['Date_Bank', 'Amount_Bank', 'ID_Bank', 'Amount_Rounded']].rename(columns={
+                'Date_Bank': 'Date', 'Amount_Bank': 'Amount', 'ID_Bank': 'ID'
+            }).copy()
+            unmatched_bank_initial['Date'] = pd.to_datetime(unmatched_bank_initial['Date'])
+        else:
+            unmatched_bank_initial = pd.DataFrame(columns=['Date', 'Amount', 'ID', 'Amount_Rounded'])
+            unmatched_bank_initial['Date'] = pd.to_datetime(unmatched_bank_initial['Date'])
+
+        # --- 6. Reconciliation with Date Tolerance (3 days) ---
+        matched_with_tolerance, final_unmatched_internal, final_unmatched_bank = perform_date_tolerance_matching(
+            unmatched_internal_initial, unmatched_bank_initial, tolerance_days=3
+        )
+
+        # Combine all matched records
+        matched_total = pd.concat([matched_transactions, matched_with_tolerance], ignore_index=True)
+
+        # --- 7. Summary of Reconciliation ---
+        total_matched_amount_internal = matched_total['Amount_Internal'].sum() if 'Amount_Internal' in matched_total.columns else 0
+        total_matched_amount_bank = matched_total['Amount_Bank'].sum() if 'Amount_Bank' in matched_total.columns else 0
+        remaining_unmatched_internal_amount = final_unmatched_internal['Amount'].sum() if 'Amount' in final_unmatched_internal.columns else 0
+        remaining_unmatched_bank_amount = final_unmatched_bank['Amount'].sum() if 'Amount' in final_unmatched_bank.columns else 0
+
+        summary = {
+            "Total Internal Records (for recon)": len(zeepay_hex_df_recon),
+            "Total Bank Statement Records (for recon)": len(zeepay_bank_df_recon),
+            "Total Internal Credits (Original)": total_internal_credits,
+            "Total Bank Credits (Original)": total_bank_credits,
+            "Overall Discrepancy (Original)": discrepancy_amount,
+            "Total Matched Transactions (All Stages)": len(matched_total),
+            "Total Matched Amount (Internal)": total_matched_amount_internal,
+            "Total Matched Amount (Bank)": total_matched_amount_bank,
+            "Unmatched Internal Records (Final)": len(final_unmatched_internal),
+            "Unmatched Bank Records (Final)": len(final_unmatched_bank),
+            "Unmatched Internal Amount (Final)": remaining_unmatched_internal_amount,
+            "Unmatched Bank Amount (Final)": remaining_unmatched_bank_amount,
+            "Currency": extracted_currency,
+            "% accuracy": f"{(total_bank_credits / total_internal_credits * 100):.2f}%" if total_internal_credits != 0 else "N/A"
+        }
+
+    except Exception as e:
+        st.error(f"Error during Zeepay reconciliation processing: {str(e)}")
+        return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+    return matched_total, final_unmatched_internal, final_unmatched_bank, summary
+
 def reconcile_cellulant_ngn(internal_file_obj, bank_file_obj):
     """
     Performs reconciliation for Cellulant Nigeria (NGN).
@@ -5271,7 +5434,7 @@ RECONCILIATION_FUNCTIONS["I&M TZS"] = reconcile_i_and_m_tzs
 
 #Ghana
 #RECONCILIATION_FUNCTIONS["Flutterwave GHS"] = reconcile_flutterwave_ghs
-#RECONCILIATION_FUNCTIONS["Zeepay"] = reconcile_zeepay
+RECONCILIATION_FUNCTIONS["Zeepay"] = reconcile_zeepay
 #RECONCILIATION_FUNCTIONS["Fincra GHS"] = reconcile_efincra_ghs
 
 #SEN
