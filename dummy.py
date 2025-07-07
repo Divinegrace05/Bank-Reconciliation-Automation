@@ -1963,7 +1963,7 @@ def reconcile_ncba_kes(internal_file_obj, bank_file_obj):
         ncba_hex_df_recon['Amount_Rounded'] = ncba_hex_df_recon['Amount'].round(2)
 
         # --- Extract currency from internal_df ---
-        extracted_currency = "KES"  # Default for NCBA Kenya
+        extracted_currency = "KES"
         if 'CURRENCY' in ncba_hex_df.columns and not ncba_hex_df['CURRENCY'].empty:
             unique_currencies = ncba_hex_df['CURRENCY'].dropna().unique()
             if unique_currencies.size > 0:
@@ -2086,6 +2086,258 @@ def reconcile_ncba_kes(internal_file_obj, bank_file_obj):
 
     except Exception as e:
         st.error(f"Error during NCBA KES reconciliation processing: {str(e)}")
+        return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+    return matched_total, final_unmatched_internal, final_unmatched_bank, summary
+
+def reconcile_ncba_usd(internal_file_obj, bank_file_obj):
+    """
+    Performs reconciliation for NCBA Bank USD accounts with enhanced matching:
+    1. Exact matching (same date + amount)
+    2. Date tolerance matching (±3 days)
+    3. Aggregated matching (sum of credits by date)
+    
+    Bank statement processing:
+    - Uses header=17
+    - Handles '-' in Credit column by converting to 0
+    - Converts Credit amounts to numeric values
+    - Filters for positive credits (>0) with Description containing 'Money remittance imited'
+    """
+    # Initialize empty DataFrames with proper columns
+    matched_transactions = pd.DataFrame(columns=[
+        'Date_Internal', 'Amount_Internal', 'ID_Internal',
+        'Date_Bank', 'Amount_Bank', 'ID_Bank',
+        'Amount_Rounded', 'Match_Type'
+    ])
+    unmatched_internal = pd.DataFrame(columns=['Date', 'Amount', 'ID', 'Amount_Rounded'])
+    unmatched_bank = pd.DataFrame(columns=['Date', 'Amount', 'ID', 'Amount_Rounded'])
+    summary = {}
+
+    try:
+        # --- 1. Load the datasets ---
+        ncba_hex_df = read_uploaded_file(internal_file_obj, header=0)
+        ncba_bank_df = read_uploaded_file(bank_file_obj, header=17)  # Header at row 18 (0-indexed 17)
+        
+        if ncba_hex_df is None or ncba_bank_df is None:
+            st.error("One or both files could not be loaded for NCBA USD.")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        # --- 2. Preprocessing for internal records ---
+        ncba_hex_df.columns = ncba_hex_df.columns.astype(str).str.strip()
+
+        # Essential columns for internal records
+        internal_required_cols = ['TRANSFER_DATE', 'AMOUNT']
+        if not all(col in ncba_hex_df.columns for col in internal_required_cols):
+            missing_cols = [col for col in internal_required_cols if col not in ncba_hex_df.columns]
+            st.error(f"Internal records (NCBA Hex) are missing essential columns: {', '.join(missing_cols)}.")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        ncba_hex_df = ncba_hex_df.rename(columns={
+            'TRANSFER_DATE': 'Date',
+            'AMOUNT': 'Amount',
+            'COMMENT': 'Description',
+            'TRANSFER_ID': 'ID'
+        })
+
+        # Convert and filter dates
+        ncba_hex_df['Date'] = pd.to_datetime(ncba_hex_df['Date'], errors='coerce')
+        ncba_hex_df = ncba_hex_df.dropna(subset=['Date']).copy()
+
+        # Filter positive amounts and prepare for reconciliation
+        ncba_hex_df_recon = ncba_hex_df[ncba_hex_df['Amount'] > 0].copy()
+        ncba_hex_df_recon['Date_Match'] = ncba_hex_df_recon['Date'].dt.date
+        ncba_hex_df_recon['Amount_Rounded'] = ncba_hex_df_recon['Amount'].round(2)
+
+        # --- Extract currency from internal_df ---
+        extracted_currency = "USD"
+        if 'CURRENCY' in ncba_hex_df.columns and not ncba_hex_df['CURRENCY'].empty:
+            unique_currencies = ncba_hex_df['CURRENCY'].dropna().unique()
+            if unique_currencies.size > 0:
+                extracted_currency = str(unique_currencies[0])
+
+        # --- 3. Preprocessing for bank statements (NCBA USD Specific) ---
+        ncba_bank_df.columns = ncba_bank_df.columns.astype(str).str.strip()
+
+        # Essential columns for bank statements
+        bank_required_cols = ['Transaction Date', 'Credit', 'Description', 'Reference Number']
+        if not all(col in ncba_bank_df.columns for col in bank_required_cols):
+            missing_cols = [col for col in bank_required_cols if col not in ncba_bank_df.columns]
+            st.error(f"Bank statement (NCBA USD) is missing essential columns: {', '.join(missing_cols)}.")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        ncba_bank_df = ncba_bank_df.rename(columns={
+            'Transaction Date': 'Date',
+            'Credit': 'Credit',
+            'Reference Number': 'ID',
+            'Description': 'Description'
+        })
+
+        # Convert dates - NCBA format is typically YYYY-MM-DD
+        ncba_bank_df['Date'] = pd.to_datetime(ncba_bank_df['Date'], errors='coerce')
+        ncba_bank_df = ncba_bank_df.dropna(subset=['Date']).copy()
+
+        # Clean credit amounts - replace '-' with 0 and convert to numeric
+        ncba_bank_df['Credit'] = ncba_bank_df['Credit'].replace('-', '0').astype(str)
+        ncba_bank_df['Credit'] = (
+            ncba_bank_df['Credit'].str.replace(',', '', regex=False)
+            .astype(float)
+            .fillna(0)
+        )
+
+        # NCBA USD Specific Filters
+        # 1. Filter for positive credits
+        # 2. Filter for transactions containing 'Nala money remittance imited' in Description
+        ncba_bank_df_recon = ncba_bank_df[
+            (ncba_bank_df['Credit'] > 0) &
+            (ncba_bank_df['Description'].astype(str).str.contains('NALA MONEY REMITTANCE LIMITED', case=False, na=False))
+        ].copy()
+
+        if ncba_bank_df_recon.empty:
+            st.warning("No valid bank records found after filtering for positive credits with 'Nala money remittance imited' in description.")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        ncba_bank_df_recon['Amount'] = ncba_bank_df_recon['Credit']
+        ncba_bank_df_recon = ncba_bank_df_recon[['Date', 'Amount', 'Description', 'ID']].copy()
+        ncba_bank_df_recon['Date_Match'] = ncba_bank_df_recon['Date'].dt.date
+        ncba_bank_df_recon['Amount_Rounded'] = ncba_bank_df_recon['Amount'].round(2)
+
+        # --- 4. Calculate Total Amounts and Discrepancy (before reconciliation) ---
+        total_internal_credits = ncba_hex_df_recon['Amount'].sum()
+        total_bank_credits = ncba_bank_df_recon['Amount'].sum()
+        discrepancy_amount = total_internal_credits - total_bank_credits
+
+        # --- 5. Reconciliation (Exact Match) ---
+        reconciled_df = pd.merge(
+            ncba_hex_df_recon.assign(Source_Internal='Internal'),
+            ncba_bank_df_recon.assign(Source_Bank='Bank'),
+            on=['Date_Match', 'Amount_Rounded'],
+            how='outer',
+            suffixes=('_Internal', '_Bank')
+        )
+
+        # Identify matched transactions
+        matched_exact = reconciled_df.dropna(subset=['Source_Internal', 'Source_Bank']).copy()
+        if not matched_exact.empty:
+            cols_to_select = [col for col in [
+                'Date_Internal', 'Amount_Internal', 'ID_Internal',
+                'Date_Bank', 'Amount_Bank', 'ID_Bank', 'Amount_Rounded'
+            ] if col in matched_exact.columns]
+            matched_exact = matched_exact[cols_to_select].copy()
+            matched_exact['Match_Type'] = 'Exact'
+
+        # Prepare initially unmatched records for next stages
+        unmatched_internal_initial = reconciled_df[reconciled_df['Source_Bank'].isna()].copy()
+        if not unmatched_internal_initial.empty:
+            unmatched_internal_initial = unmatched_internal_initial[['Date_Internal', 'Amount_Internal', 'ID_Internal', 'Amount_Rounded']].rename(columns={
+                'Date_Internal': 'Date', 'Amount_Internal': 'Amount', 'ID_Internal': 'ID'
+            }).copy()
+            unmatched_internal_initial['Date'] = pd.to_datetime(unmatched_internal_initial['Date'])
+        else:
+            unmatched_internal_initial = pd.DataFrame(columns=['Date', 'Amount', 'ID', 'Amount_Rounded'])
+            unmatched_internal_initial['Date'] = pd.to_datetime(unmatched_internal_initial['Date'])
+
+        unmatched_bank_initial = reconciled_df[reconciled_df['Source_Internal'].isna()].copy()
+        if not unmatched_bank_initial.empty:
+            unmatched_bank_initial = unmatched_bank_initial[['Date_Bank', 'Amount_Bank', 'ID_Bank', 'Amount_Rounded']].rename(columns={
+                'Date_Bank': 'Date', 'Amount_Bank': 'Amount', 'ID_Bank': 'ID'
+            }).copy()
+            unmatched_bank_initial['Date'] = pd.to_datetime(unmatched_bank_initial['Date'])
+        else:
+            unmatched_bank_initial = pd.DataFrame(columns=['Date', 'Amount', 'ID', 'Amount_Rounded'])
+            unmatched_bank_initial['Date'] = pd.to_datetime(unmatched_bank_initial['Date'])
+
+        # --- 6. Reconciliation with Date Tolerance (3 days) ---
+        matched_with_tolerance, remaining_internal_after_tolerance, remaining_bank_after_tolerance = perform_date_tolerance_matching(
+            unmatched_internal_initial, unmatched_bank_initial, tolerance_days=3
+        )
+        if not matched_with_tolerance.empty:
+            matched_with_tolerance['Match_Type'] = 'Tolerance'
+
+        # --- 7. Aggregated Matching (sum of credits by date) ---
+        matched_aggregated = pd.DataFrame()
+        
+        if not remaining_internal_after_tolerance.empty and not remaining_bank_after_tolerance.empty:
+            st.info("Attempting aggregated matching by summing bank credits per date...")
+            
+            # Group bank transactions by date and sum amounts
+            bank_aggregated = remaining_bank_after_tolerance.groupby('Date')['Amount'].sum().reset_index()
+            bank_aggregated['Amount_Rounded'] = bank_aggregated['Amount'].round(2)
+            
+            # Merge with internal records on date and rounded amount
+            temp_internal = remaining_internal_after_tolerance.copy()
+            temp_internal['Amount_Rounded'] = temp_internal['Amount'].round(2)
+            
+            matched_aggregated = pd.merge(
+                temp_internal,
+                bank_aggregated,
+                on=['Date', 'Amount_Rounded'],
+                how='inner'
+            )
+            
+            if not matched_aggregated.empty:
+                # Get the original bank transactions that contributed to the aggregated match
+                matched_bank_ids = []
+                for _, row in matched_aggregated.iterrows():
+                    date_match = row['Date']
+                    contributing_trans = remaining_bank_after_tolerance[
+                        (remaining_bank_after_tolerance['Date'] == date_match)
+                    ]
+                    matched_bank_ids.extend(contributing_trans['ID'].tolist())
+                
+                # Create the matched records
+                matched_aggregated = matched_aggregated.rename(columns={
+                    'Amount_x': 'Amount_Internal',
+                    'Amount_y': 'Amount_Bank'
+                })
+                matched_aggregated['Match_Type'] = 'Aggregated'
+                
+                # Remove matched records from unmatched sets
+                remaining_internal_after_tolerance = remaining_internal_after_tolerance[
+                    ~remaining_internal_after_tolerance['ID'].isin(matched_aggregated['ID'].tolist())
+                ]
+                remaining_bank_after_tolerance = remaining_bank_after_tolerance[
+                    ~remaining_bank_after_tolerance['ID'].isin(matched_bank_ids)
+                ]
+
+        # --- 8. Combine all matched records ---
+        matched_total = pd.concat([
+            matched_exact,
+            matched_with_tolerance,
+            matched_aggregated
+        ], ignore_index=True)
+
+        # Final unmatched records
+        final_unmatched_internal = remaining_internal_after_tolerance.copy()
+        final_unmatched_bank = remaining_bank_after_tolerance.copy()
+
+        # --- 9. Summary of Reconciliation ---
+        total_matched_amount_internal = matched_total['Amount_Internal'].sum() if 'Amount_Internal' in matched_total.columns else 0
+        total_matched_amount_bank = matched_total['Amount_Bank'].sum() if 'Amount_Bank' in matched_total.columns else 0
+        remaining_unmatched_internal_amount = final_unmatched_internal['Amount'].sum() if 'Amount' in final_unmatched_internal.columns else 0
+        remaining_unmatched_bank_amount = final_unmatched_bank['Amount'].sum() if 'Amount' in final_unmatched_bank.columns else 0
+
+        summary = {
+            "Total Internal Records (for recon)": len(ncba_hex_df_recon),
+            "Total Bank Statement Records (for recon)": len(ncba_bank_df_recon),
+            "Total Internal Credits (Original)": total_internal_credits,
+            "Total Bank Credits (Original)": total_bank_credits,
+            "Overall Discrepancy (Original)": discrepancy_amount,
+            "Total Matched Transactions (All Stages)": len(matched_total),
+            "Exact Matches": len(matched_exact) if not matched_exact.empty else 0,
+            "Tolerance Matches": len(matched_with_tolerance) if not matched_with_tolerance.empty else 0,
+            "Aggregated Matches": len(matched_aggregated) if not matched_aggregated.empty else 0,
+            "Total Matched Amount (Internal)": total_matched_amount_internal,
+            "Total Matched Amount (Bank)": total_matched_amount_bank,
+            "Unmatched Internal Records (Final)": len(final_unmatched_internal),
+            "Unmatched Bank Records (Final)": len(final_unmatched_bank),
+            "Unmatched Internal Amount (Final)": remaining_unmatched_internal_amount,
+            "Unmatched Bank Amount (Final)": remaining_unmatched_bank_amount,
+            "Currency": extracted_currency,
+            "% accuracy": f"{(total_bank_credits / total_internal_credits * 100):.2f}%" if total_internal_credits != 0 else "N/A"
+        }
+
+    except Exception as e:
+        st.error(f"Error during NCBA USD reconciliation processing: {str(e)}")
         return matched_transactions, unmatched_internal, unmatched_bank, summary
 
     return matched_total, final_unmatched_internal, final_unmatched_bank, summary
@@ -4455,7 +4707,7 @@ RECONCILIATION_FUNCTIONS["I&M KES"] = reconcile_i_and_m_kes
 RECONCILIATION_FUNCTIONS["I&M USD Sending"] = reconcile_i_and_m_usd_ke_sending
 RECONCILIATION_FUNCTIONS["I&M USD Receiving"] = reconcile_i_and_m_usd_ke_receiving
 RECONCILIATION_FUNCTIONS["NCBA KES"] = reconcile_ncba_kes
-#RECONCILIATION_FUNCTIONS["NCBA USD"] = reconcile_ncba_usd
+RECONCILIATION_FUNCTIONS["NCBA USD"] = reconcile_ncba_usd
 
 # TZ
 RECONCILIATION_FUNCTIONS["Selcom TZ"] = reconcile_selcom_tz
