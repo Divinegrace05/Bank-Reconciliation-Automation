@@ -3436,7 +3436,6 @@ def reconcile_cellulant_tz(internal_file_obj, bank_file_obj):
     # --- 7. Return the results ---
     return final_matched_total, final_unmatched_internal, final_unmatched_bank, summary
 
- 
 def reconcile_flutterwave_ug(internal_file_obj, bank_file_obj):
     """
     Performs reconciliation for Flutterwave Uganda.
@@ -4201,6 +4200,182 @@ def reconcile_fincra_ghs(internal_file_obj, bank_file_obj):
     except Exception as e:
         st.error(f"Fincra Reconciliation error: {str(e)}")
         return empty_df, empty_unmatched, empty_unmatched, {}
+
+def reconcile_i_and_m_rwf(internal_file_obj, bank_file_obj):
+    """
+    Performs reconciliation for I&M Bank Rwanda (RWF).
+    Expects internal_file_obj (CSV/Excel) and bank_file_obj (CSV/Excel with header=17).
+    Filters for credit transactions where 'Credit' > 0 after converting text to numeric.
+    Returns matched, unmatched_internal, unmatched_bank dataframes and a summary dictionary.
+    """
+    # Initialize empty DataFrames with proper columns
+    matched_transactions = create_empty_matched_df()
+    unmatched_internal = create_empty_unmatched_df()
+    unmatched_bank = create_empty_unmatched_df()
+    summary = {}
+
+    try:
+        # --- 1. Load the datasets ---
+        im_rwf_hex_df = read_uploaded_file(internal_file_obj, header=0)
+        im_rwf_bank_df = read_uploaded_file(bank_file_obj, header=17)
+
+        if im_rwf_hex_df is None or im_rwf_bank_df is None:
+            st.error("One or both files could not be loaded for I&M RWF.")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        # --- 2. Preprocessing for internal records ---
+        im_rwf_hex_df.columns = im_rwf_hex_df.columns.astype(str).str.strip()
+
+        internal_required_cols = ['TRANSFER_DATE', 'AMOUNT']
+        if not all(col in im_rwf_hex_df.columns for col in internal_required_cols):
+            missing_cols = [col for col in internal_required_cols if col not in im_rwf_hex_df.columns]
+            st.error(f"Internal records are missing essential columns: {', '.join(missing_cols)}.")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        im_rwf_hex_df = im_rwf_hex_df.rename(columns={
+            'TRANSFER_DATE': 'Date', 
+            'AMOUNT': 'Amount',
+            'COMMENT': 'Description',
+            'TRANSFER_ID': 'ID'
+        })
+
+        # Convert and filter dates
+        im_rwf_hex_df['Date'] = pd.to_datetime(im_rwf_hex_df['Date'], errors='coerce')
+        im_rwf_hex_df = im_rwf_hex_df.dropna(subset=['Date']).copy()
+
+        # Filter positive amounts and prepare for reconciliation
+        im_rwf_hex_df_recon = im_rwf_hex_df[im_rwf_hex_df['Amount'] > 0].copy()
+        im_rwf_hex_df_recon['Date_Match'] = im_rwf_hex_df_recon['Date'].dt.date
+        im_rwf_hex_df_recon['Amount_Rounded'] = im_rwf_hex_df_recon['Amount'].round(2)
+
+        # --- Extract currency from internal_df ---
+        extracted_currency = "RWF"
+        if 'CURRENCY' in im_rwf_hex_df.columns and not im_rwf_hex_df['CURRENCY'].empty:
+            unique_currencies = im_rwf_hex_df['CURRENCY'].dropna().unique()
+            if unique_currencies.size > 0:
+                extracted_currency = str(unique_currencies[0])
+
+        # --- 3. Preprocessing for bank statements (I&M RWF Specific) ---
+        im_rwf_bank_df.columns = im_rwf_bank_df.columns.astype(str).str.strip()
+
+        # Essential columns for bank statements
+        bank_required_cols = ['Transaction Date', 'Value Date', 'Description', 
+                            'Tran Id', 'Cheque ID', 'Debit', 'Credit', 'Balance (RWF)']
+        if not all(col in im_rwf_bank_df.columns for col in bank_required_cols):
+            missing_cols = [col for col in bank_required_cols if col not in im_rwf_bank_df.columns]
+            st.error(f"Bank statement is missing essential columns: {', '.join(missing_cols)}.")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        # Rename columns for consistency
+        im_rwf_bank_df = im_rwf_bank_df.rename(columns={
+            'Transaction Date': 'Transaction_Date',
+            'Value Date': 'Value_Date',
+            'Tran Id': 'ID',
+            'Cheque ID': 'Cheque_ID',
+            'Balance (RWF)': 'Balance'
+        })
+
+        # Use Value Date if available, otherwise Transaction Date
+        im_rwf_bank_df['Date'] = pd.to_datetime(im_rwf_bank_df['Value_Date'], dayfirst=True, errors='coerce')
+        im_rwf_bank_df['Date'] = im_rwf_bank_df['Date'].fillna(
+            pd.to_datetime(im_rwf_bank_df['Transaction_Date'], dayfirst=True, errors='coerce'))
+        im_rwf_bank_df = im_rwf_bank_df.dropna(subset=['Date']).copy()
+        
+        # Robust credit amount cleaning - handle text values and convert to numeric
+        im_rwf_bank_df['Credit'] = im_rwf_bank_df['Credit'].astype(str)
+        
+        # Remove any non-numeric characters except decimal point and negative sign
+        im_rwf_bank_df['Credit'] = im_rwf_bank_df['Credit'].str.replace(r'[^\d.-]', '', regex=True)
+        
+        # Convert to numeric, coercing errors to NaN
+        im_rwf_bank_df['Credit'] = pd.to_numeric(im_rwf_bank_df['Credit'], errors='coerce')
+        
+        # Fill NaN values with 0 (for text entries that couldn't be converted)
+        im_rwf_bank_df['Credit'] = im_rwf_bank_df['Credit'].fillna(0)
+
+        # Filter for positive credits
+        im_rwf_bank_df_recon = im_rwf_bank_df[im_rwf_bank_df['Credit'] > 0].copy()
+        im_rwf_bank_df_recon['Amount'] = im_rwf_bank_df_recon['Credit']
+        im_rwf_bank_df_recon = im_rwf_bank_df_recon[['Date', 'Amount', 'Description', 'ID']].copy()
+        im_rwf_bank_df_recon['Date_Match'] = im_rwf_bank_df_recon['Date'].dt.date
+        im_rwf_bank_df_recon['Amount_Rounded'] = im_rwf_bank_df_recon['Amount'].round(2)
+
+        if im_rwf_bank_df_recon.empty:
+            st.warning("No valid bank records found after filtering for positive credits.")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        # --- 4. Calculate Total Amounts and Discrepancy (before reconciliation) ---
+        total_internal_credits = im_rwf_hex_df_recon['Amount'].sum()
+        total_bank_credits = im_rwf_bank_df_recon['Amount'].sum()
+        discrepancy_amount = total_internal_credits - total_bank_credits
+
+        # --- 5. Reconciliation (Exact Match) ---
+        reconciled_df = pd.merge(
+            im_rwf_hex_df_recon.assign(Source_Internal='Internal'),
+            im_rwf_bank_df_recon.assign(Source_Bank='Bank'),
+            on=['Date_Match', 'Amount_Rounded'],
+            how='outer',
+            suffixes=('_Internal', '_Bank'))
+        
+        # Identify matched transactions
+        matched_exact = reconciled_df.dropna(subset=['Source_Internal', 'Source_Bank']).copy()
+        if not matched_exact.empty:
+            cols_to_select = [col for col in [
+                'Date_Internal', 'Amount_Internal', 'ID_Internal',
+                'Date_Bank', 'Amount_Bank', 'ID_Bank', 'Amount_Rounded'
+            ] if col in matched_exact.columns]
+            matched_transactions = matched_exact[cols_to_select].copy()
+
+        # Prepare initially unmatched records for tolerance matching
+        unmatched_internal_initial = reconciled_df[reconciled_df['Source_Bank'].isna()].copy()
+        if not unmatched_internal_initial.empty:
+            unmatched_internal_initial = unmatched_internal_initial[['Date_Internal', 'Amount_Internal', 'ID_Internal', 'Amount_Rounded']].rename(columns={
+                'Date_Internal': 'Date', 'Amount_Internal': 'Amount', 'ID_Internal': 'ID'
+            }).copy()
+            unmatched_internal_initial['Date'] = pd.to_datetime(unmatched_internal_initial['Date'])
+        else:
+            unmatched_internal_initial = create_empty_unmatched_df()
+            unmatched_internal_initial['Date'] = pd.to_datetime(unmatched_internal_initial['Date'])
+
+        unmatched_bank_initial = reconciled_df[reconciled_df['Source_Internal'].isna()].copy()
+        if not unmatched_bank_initial.empty:
+            unmatched_bank_initial = unmatched_bank_initial[['Date_Bank', 'Amount_Bank', 'ID_Bank', 'Amount_Rounded']].rename(columns={
+                'Date_Bank': 'Date', 'Amount_Bank': 'Amount', 'ID_Bank': 'ID'
+            }).copy()
+            unmatched_bank_initial['Date'] = pd.to_datetime(unmatched_bank_initial['Date'])
+        else:
+            unmatched_bank_initial = create_empty_unmatched_df()
+            unmatched_bank_initial['Date'] = pd.to_datetime(unmatched_bank_initial['Date'])
+
+        # --- 6. Reconciliation with Date Tolerance (3 days) ---
+        matched_with_tolerance, final_unmatched_internal, final_unmatched_bank = perform_date_tolerance_matching(
+            unmatched_internal_initial, unmatched_bank_initial, tolerance_days=3
+        )
+
+        # Combine all matched records
+        matched_total = pd.concat([matched_transactions, matched_with_tolerance], ignore_index=True)
+
+        # --- 7. Summary of Reconciliation ---
+        summary = {
+            "Total Internal Records (for recon)": len(im_rwf_hex_df_recon),
+            "Total Bank Statement Records (for recon)": len(im_rwf_bank_df_recon),
+            "Total Internal Credits (Original)": total_internal_credits,
+            "Total Bank Credits (Original)": total_bank_credits,
+            "Overall Discrepancy (Original)": discrepancy_amount,
+            "Total Matched Transactions (All Stages)": len(matched_total),
+            "Unmatched Internal Records (Final)": len(final_unmatched_internal),
+            "Unmatched Bank Records (Final)": len(final_unmatched_bank),
+            "Unmatched Internal Amount (Final)": final_unmatched_internal['Amount'].sum(),
+            "Unmatched Bank Amount (Final)": final_unmatched_bank['Amount'].sum(),
+            "Currency": extracted_currency,
+            "% accuracy": f"{(total_bank_credits / total_internal_credits * 100):.2f}%" if total_internal_credits != 0 else "N/A"
+        }
+
+    except Exception as e:
+        st.error(f"Error during I&M RWF reconciliation processing: {str(e)}")
+        return create_empty_matched_df(), create_empty_unmatched_df(), create_empty_unmatched_df(), {}
+
+    return matched_total, final_unmatched_internal, final_unmatched_bank, summary
 
 def reconcile_cellulant_ngn(internal_file_obj, bank_file_obj):
     """
@@ -5812,7 +5987,7 @@ RECONCILIATION_FUNCTIONS["Fincra GHS"] = reconcile_fincra_ghs
 #RWF
 #RECONCILIATION_FUNCTIONS["Flutterwave RWF"] = reconcile_flutterwave_rwf
 #RECONCILIATION_FUNCTIONS["Kremit"] = reconcile_kremit
-#RECONCILIATION_FUNCTIONS["I&M RWF"] = reconcile_i_and_m_rwf
+RECONCILIATION_FUNCTIONS["I&M RWF"] = reconcile_i_and_m_rwf
 #RECONCILIATION_FUNCTIONS["I&M USD (RWF)"] = reconcile_i_and_m_usd_rwf
 
 #CAM
