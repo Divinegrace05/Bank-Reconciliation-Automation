@@ -4201,6 +4201,199 @@ def reconcile_fincra_ghs(internal_file_obj, bank_file_obj):
         st.error(f"Fincra Reconciliation error: {str(e)}")
         return empty_df, empty_unmatched, empty_unmatched, {}
 
+def reconcile_aza_xof(internal_file_obj, bank_file_obj, sheet_name=None):
+    """
+    Performs reconciliation for AZA Finance XOF.
+    Expects internal_file_obj (CSV/Excel) and bank_file_obj (Excel with multiple sheets).
+    sheet_name: Optional sheet name to use from the bank statement Excel file.
+    """
+    # Initialize empty DataFrames
+    matched_transactions = pd.DataFrame(columns=[
+        'Date_Internal', 'Amount_Internal', 'ID_Internal',
+        'Date_Bank', 'Amount_Bank', 'ID_Bank',
+        'Amount_Rounded'
+    ])
+    unmatched_internal = pd.DataFrame(columns=['Date', 'Amount', 'ID', 'Amount_Rounded'])
+    unmatched_bank = pd.DataFrame(columns=['Date', 'Amount', 'ID', 'Amount_Rounded'])
+    summary = {}
+
+    try:
+        # --- 1. Load internal records ---
+        aza_hex_df = read_uploaded_file(internal_file_obj, header=0)
+        if aza_hex_df is None:
+            st.error("Failed to load internal records file.")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        # --- 2. Load bank statement ---
+        bank_file_obj.seek(0)  # Reset file pointer
+        
+        # Use specified sheet if provided, otherwise read first sheet
+        if sheet_name:
+            aza_bank_df = pd.read_excel(bank_file_obj, sheet_name=sheet_name, header=0)
+        else:
+            # Default behavior if no sheet specified
+            aza_bank_df = pd.read_excel(bank_file_obj, header=0)
+        
+        # --- 3. Preprocessing for internal records ---
+        aza_hex_df.columns = aza_hex_df.columns.astype(str).str.strip()
+        
+        internal_required_cols = ['TRANSFER_DATE', 'AMOUNT']
+        if not all(col in aza_hex_df.columns for col in internal_required_cols):
+            missing_cols = [col for col in internal_required_cols if col not in aza_hex_df.columns]
+            st.error(f"Internal records are missing essential columns: {', '.join(missing_cols)}.")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        aza_hex_df = aza_hex_df.rename(columns={
+            'TRANSFER_DATE': 'Date',
+            'AMOUNT': 'Amount',
+            'COMMENT': 'Description',
+            'TRANSFER_ID': 'ID'
+        })
+
+        # Convert and filter dates
+        aza_hex_df['Date'] = pd.to_datetime(aza_hex_df['Date'], errors='coerce')
+        aza_hex_df = aza_hex_df.dropna(subset=['Date']).copy()
+
+        # Filter positive amounts and prepare for reconciliation
+        aza_hex_df_recon = aza_hex_df[aza_hex_df['Amount'] > 0].copy()
+        aza_hex_df_recon['Date_Match'] = aza_hex_df_recon['Date'].dt.date
+        aza_hex_df_recon['Amount_Rounded'] = aza_hex_df_recon['Amount'].round(2)
+
+        # --- Extract currency from internal_df ---
+        extracted_currency = "XOF"
+        if 'CURRENCY' in aza_hex_df.columns and not aza_hex_df['CURRENCY'].empty:
+            unique_currencies = aza_hex_df['CURRENCY'].dropna().unique()
+            if unique_currencies.size > 0:
+                extracted_currency = str(unique_currencies[0])
+
+        # --- 4. Preprocessing for bank statements (AZA XOF Specific) ---
+        aza_bank_df.columns = aza_bank_df.columns.astype(str).str.strip()
+
+        # Essential columns for bank statements
+        bank_required_cols = ['Transaction Type', 'Date', 'Credits', 'Input Currency']
+        if not all(col in aza_bank_df.columns for col in bank_required_cols):
+            missing_cols = [col for col in bank_required_cols if col not in aza_bank_df.columns]
+            st.error(f"Bank statement is missing essential columns: {', '.join(missing_cols)}.")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        aza_bank_df = aza_bank_df[
+            (aza_bank_df['Transaction Type'].str.upper() == 'CREDIT') &
+            (aza_bank_df['Input Currency'].str.upper() == 'XOF') &
+            (pd.to_numeric(aza_bank_df['Credits'], errors='coerce') > 0)
+        ].copy()
+
+        # Clean and convert credits
+        aza_bank_df['Credits'] = (
+            aza_bank_df['Credits'].astype(str)
+            .str.replace(',', '', regex=False)
+            .astype(float)
+            .fillna(0)
+        )
+
+        # Rename columns for consistency
+        aza_bank_df = aza_bank_df.rename(columns={
+            'Date': 'Date',
+            'Credits': 'Amount',
+            'BitPesa ID': 'ID',
+            'TXN Narration': 'Description'
+        })
+
+        # Convert dates
+        aza_bank_df['Date'] = pd.to_datetime(aza_bank_df['Date'], errors='coerce')
+        aza_bank_df = aza_bank_df.dropna(subset=['Date']).copy()
+
+        # Filter positive amounts
+        aza_bank_df_recon = aza_bank_df[['Date', 'Amount', 'Description', 'ID']].copy()
+        aza_bank_df_recon['Date_Match'] = aza_bank_df_recon['Date'].dt.date
+        aza_bank_df_recon['Amount_Rounded'] = aza_bank_df_recon['Amount'].round(2)
+
+        if aza_bank_df_recon.empty:
+            st.warning("No valid bank records found after applying AZA XOF filters.")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        # --- 5. Calculate Total Amounts and Discrepancy ---
+        total_internal_credits = aza_hex_df_recon['Amount'].sum()
+        total_bank_credits = aza_bank_df_recon['Amount'].sum()
+        discrepancy_amount = total_internal_credits - total_bank_credits
+
+        # --- 6. Reconciliation (Exact Match) ---
+        reconciled_df = pd.merge(
+            aza_hex_df_recon.assign(Source_Internal='Internal'),
+            aza_bank_df_recon.assign(Source_Bank='Bank'),
+            on=['Date_Match', 'Amount_Rounded'],
+            how='outer',
+            suffixes=('_Internal', '_Bank')
+        )
+
+        # Identify matched transactions
+        matched_exact = reconciled_df.dropna(subset=['Source_Internal', 'Source_Bank']).copy()
+        if not matched_exact.empty:
+            cols_to_select = [col for col in [
+                'Date_Internal', 'Amount_Internal', 'ID_Internal',
+                'Date_Bank', 'Amount_Bank', 'ID_Bank', 'Amount_Rounded'
+            ] if col in matched_exact.columns]
+            matched_transactions = matched_exact[cols_to_select].copy()
+
+        # Prepare initially unmatched records for tolerance matching
+        unmatched_internal_initial = reconciled_df[reconciled_df['Source_Bank'].isna()].copy()
+        if not unmatched_internal_initial.empty:
+            unmatched_internal_initial = unmatched_internal_initial[['Date_Internal', 'Amount_Internal', 'ID_Internal', 'Amount_Rounded']].rename(columns={
+                'Date_Internal': 'Date', 'Amount_Internal': 'Amount', 'ID_Internal': 'ID'
+            }).copy()
+            unmatched_internal_initial['Date'] = pd.to_datetime(unmatched_internal_initial['Date'])
+        else:
+            unmatched_internal_initial = pd.DataFrame(columns=['Date', 'Amount', 'ID', 'Amount_Rounded'])
+            unmatched_internal_initial['Date'] = pd.to_datetime(unmatched_internal_initial['Date'])
+
+        unmatched_bank_initial = reconciled_df[reconciled_df['Source_Internal'].isna()].copy()
+        if not unmatched_bank_initial.empty:
+            unmatched_bank_initial = unmatched_bank_initial[['Date_Bank', 'Amount_Bank', 'ID_Bank', 'Amount_Rounded']].rename(columns={
+                'Date_Bank': 'Date', 'Amount_Bank': 'Amount', 'ID_Bank': 'ID'
+            }).copy()
+            unmatched_bank_initial['Date'] = pd.to_datetime(unmatched_bank_initial['Date'])
+        else:
+            unmatched_bank_initial = pd.DataFrame(columns=['Date', 'Amount', 'ID', 'Amount_Rounded'])
+            unmatched_bank_initial['Date'] = pd.to_datetime(unmatched_bank_initial['Date'])
+
+        # --- 7. Reconciliation with Date Tolerance (3 days) ---
+        matched_with_tolerance, final_unmatched_internal, final_unmatched_bank = perform_date_tolerance_matching(
+            unmatched_internal_initial, unmatched_bank_initial, tolerance_days=3
+        )
+
+        # Combine all matched records
+        matched_total = pd.concat([matched_transactions, matched_with_tolerance], ignore_index=True)
+
+        # --- 8. Summary of Reconciliation ---
+        total_matched_amount_internal = matched_total['Amount_Internal'].sum() if 'Amount_Internal' in matched_total.columns else 0
+        total_matched_amount_bank = matched_total['Amount_Bank'].sum() if 'Amount_Bank' in matched_total.columns else 0
+        remaining_unmatched_internal_amount = final_unmatched_internal['Amount'].sum() if 'Amount' in final_unmatched_internal.columns else 0
+        remaining_unmatched_bank_amount = final_unmatched_bank['Amount'].sum() if 'Amount' in final_unmatched_bank.columns else 0
+
+        summary = {
+            "Total Internal Records (for recon)": len(aza_hex_df_recon),
+            "Total Bank Statement Records (for recon)": len(aza_bank_df_recon),
+            "Total Internal Credits (Original)": total_internal_credits,
+            "Total Bank Credits (Original)": total_bank_credits,
+            "Overall Discrepancy (Original)": discrepancy_amount,
+            "Total Matched Transactions (All Stages)": len(matched_total),
+            "Total Matched Amount (Internal)": total_matched_amount_internal,
+            "Total Matched Amount (Bank)": total_matched_amount_bank,
+            "Unmatched Internal Records (Final)": len(final_unmatched_internal),
+            "Unmatched Bank Records (Final)": len(final_unmatched_bank),
+            "Unmatched Internal Amount (Final)": remaining_unmatched_internal_amount,
+            "Unmatched Bank Amount (Final)": remaining_unmatched_bank_amount,
+            "Currency": extracted_currency,
+            "% accuracy": f"{(total_bank_credits / total_internal_credits * 100):.2f}%" if total_internal_credits != 0 else "N/A",
+            "Selected Sheet": sheet_name if sheet_name else "Default Sheet",
+            "Bank Records Filter": "Transaction Type=CREDIT, Input Currency=XOF, Credits>0"
+        }
+
+    except Exception as e:
+        st.error(f"Error during AZA XOF reconciliation processing: {str(e)}")
+        return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+    return matched_total, final_unmatched_internal, final_unmatched_bank, summary
+
 def reconcile_i_and_m_rwf(internal_file_obj, bank_file_obj):
     """
     Performs reconciliation for I&M Bank Rwanda (RWF).
@@ -5980,7 +6173,7 @@ RECONCILIATION_FUNCTIONS["Zeepay"] = reconcile_zeepay
 RECONCILIATION_FUNCTIONS["Fincra GHS"] = reconcile_fincra_ghs
 
 #SEN
-#RECONCILIATION_FUNCTIONS["Aza Finance XOF"] = reconcile_aza_xof
+RECONCILIATION_FUNCTIONS["Aza Finance XOF"] = reconcile_aza_xof
 #RECONCILIATION_FUNCTIONS["Hub2 IC"] = reconcile_hub2_ic
 #RECONCILIATION_FUNCTIONS["Hub2 SEN"] = reconcile_hub2_sen
 
@@ -6110,6 +6303,28 @@ def reconciliation_page():
                     st.write("No duplicates found, proceed with reconciliation.")
         except Exception as e:
             st.warning(f"Could not check for duplicates: {str(e)}")
+
+    # Sheet selection for AZA Finance banks
+    selected_sheet = None
+    if st.session_state.selected_bank in ["Aza Finance XOF", "Aza Finance XAF"] and bank_file is not None:
+        try:
+            bank_file.seek(0)
+            xl = pd.ExcelFile(bank_file)
+            sheet_names = xl.sheet_names
+            if len(sheet_names) > 1:
+                selected_sheet = st.selectbox(
+                    "Select the sheet to reconcile from the bank statement:",
+                    sheet_names,
+                    key="aza_sheet_selector"
+                )
+            else:
+                selected_sheet = sheet_names[0] if sheet_names else None
+        except Exception as e:
+            st.warning(f"Could not read sheet names from bank file: {str(e)}")
+
+    # Store selected sheet in session state if it exists
+    if selected_sheet is not None:
+        st.session_state.selected_sheet = selected_sheet
 
     # Run reconciliation automatically if Pesaswap file is unlocked or manually via button
     run_reconciliation = st.button("Run Reconciliation", type="primary")
