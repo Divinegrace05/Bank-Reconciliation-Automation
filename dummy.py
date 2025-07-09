@@ -28,7 +28,7 @@ COUNTRIES_BANKS = {
     "Tanzania": ["NMB", "UBA", "Mpesa TZ", "Selcom TZ", "CRDB TZS", "CRDB USD", "Equity TZ", "Cellulant TZ", "I&M TZS", "I&M USD (TZ)"],
     "Uganda": ["Pegasus", "Flutterwave Ug", "Equity UGX", "Equity Ug USD"],
     "Ghana": ["Flutterwave GHS", "Fincra GHS", "Zeepay"],
-    "Senegal & Côte d'Ivoire XOF": ["Aza Finance XOF", "Hub2 IC", "Hub2 SEN"],
+    "Senegal & Côte d'Ivoire XOF": ["Aza Finance XOF", "Hub2 XOF", "Hub2 SEN"],
     "Rwanda": ["I&M RWF", "I&M USD (RWF)", "Kremit", "Flutterwave RWF"],
     "Cameroon XAF": ["Peex", "Pawapay", "Aza Finance XAF", "Hub2 XAF"],
     "Nigeria": ["Moniepoint", "Verto", "Cellulant NGN", "Flutterwave NGN", "Fincra NGN", "Zenith"]
@@ -6334,7 +6334,7 @@ RECONCILIATION_FUNCTIONS = {
 # Manually map specific functions that don't follow the direct naming convention
 #SEN
 RECONCILIATION_FUNCTIONS["Aza Finance XOF"] = reconcile_aza_xof
-#RECONCILIATION_FUNCTIONS["Hub2 IC"] = reconcile_hub2_ic
+RECONCILIATION_FUNCTIONS["Hub2 XOF"] = reconcile_hub2_xof
 #RECONCILIATION_FUNCTIONS["Hub2 SEN"] = reconcile_hub2_sen
 
 #RWF
