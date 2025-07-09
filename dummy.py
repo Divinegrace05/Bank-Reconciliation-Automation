@@ -4403,6 +4403,191 @@ def reconcile_aza_xof(internal_file_obj, bank_file_obj, sheet_name=None):
         return matched_transactions, unmatched_internal, unmatched_bank, summary
     return matched_total, final_unmatched_internal, final_unmatched_bank, summary
 
+def reconcile_hub2_xof(internal_file_obj, bank_file_obj):
+    """
+    Performs reconciliation for Hub2 XOF.
+    Expects internal_file_obj (CSV/Excel) and bank_file_obj (CSV/Excel with header=0).
+    Filters bank records for type='deposit' and amount > 0 after converting text to numeric.
+    Returns matched, unmatched_internal, unmatched_bank dataframes and a summary dictionary.
+    """
+    # Initialize empty DataFrames with proper columns
+    matched_transactions = create_empty_matched_df()
+    unmatched_internal = create_empty_unmatched_df()
+    unmatched_bank = create_empty_unmatched_df()
+    summary = {}
+
+    try:
+        # --- 1. Load the datasets ---
+        hub2_hex_df = read_uploaded_file(internal_file_obj, header=0)
+        hub2_bank_df = read_uploaded_file(bank_file_obj, header=0)
+
+        if hub2_hex_df is None or hub2_bank_df is None:
+            st.error("One or both files could not be loaded for Hub2 XOF.")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        # --- 2. Preprocessing for internal records ---
+        hub2_hex_df.columns = hub2_hex_df.columns.astype(str).str.strip()
+
+        # Essential columns for internal records
+        internal_required_cols = ['TRANSFER_DATE', 'AMOUNT']
+        if not all(col in hub2_hex_df.columns for col in internal_required_cols):
+            missing_cols = [col for col in internal_required_cols if col not in hub2_hex_df.columns]
+            st.error(f"Internal records are missing essential columns: {', '.join(missing_cols)}.")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        hub2_hex_df = hub2_hex_df.rename(columns={
+            'TRANSFER_DATE': 'Date', 
+            'AMOUNT': 'Amount',
+            'COMMENT': 'Description',
+            'TRANSFER_ID': 'ID'
+        })
+
+        # Convert and filter dates
+        hub2_hex_df['Date'] = pd.to_datetime(hub2_hex_df['Date'], errors='coerce')
+        hub2_hex_df = hub2_hex_df.dropna(subset=['Date']).copy()
+
+        # Filter positive amounts and prepare for reconciliation
+        hub2_hex_df_recon = hub2_hex_df[hub2_hex_df['Amount'] > 0].copy()
+        hub2_hex_df_recon['Date_Match'] = hub2_hex_df_recon['Date'].dt.date
+        hub2_hex_df_recon['Amount_Rounded'] = hub2_hex_df_recon['Amount'].round(2)
+
+        # --- Extract currency from internal_df ---
+        extracted_currency = "XOF"
+        if 'CURRENCY' in hub2_hex_df.columns and not hub2_hex_df['CURRENCY'].empty:
+            unique_currencies = hub2_hex_df['CURRENCY'].dropna().unique()
+            if unique_currencies.size > 0:
+                extracted_currency = str(unique_currencies[0])
+
+        # --- 3. Preprocessing for bank statements (Hub2 XOF Specific) ---
+        hub2_bank_df.columns = hub2_bank_df.columns.astype(str).str.strip()
+
+        # Essential columns for bank statements
+        bank_required_cols = ['type', 'amount', 'createdAtDate']
+        if not all(col in hub2_bank_df.columns for col in bank_required_cols):
+            missing_cols = [col for col in bank_required_cols if col not in hub2_bank_df.columns]
+            st.error(f"Bank statement is missing essential columns: {', '.join(missing_cols)}.")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        # Filter for deposits and positive amounts
+        hub2_bank_df = hub2_bank_df[
+            (hub2_bank_df['type'].astype(str).str.strip().str.lower() == 'deposit')
+        ].copy()
+
+        # Clean amount - remove commas and convert to numeric
+        hub2_bank_df['amount'] = (
+            hub2_bank_df['amount'].astype(str)
+            .str.replace(',', '', regex=False)
+            .replace('', '0')
+            .astype(float)
+        )
+
+        # Filter positive amounts
+        hub2_bank_df = hub2_bank_df[hub2_bank_df['amount'] > 0].copy()
+
+        # Handle ID column - use transactionId if available
+        id_col = 'transactionId' if 'transactionId' in hub2_bank_df.columns else 'reference'
+        if id_col not in hub2_bank_df.columns:
+            hub2_bank_df['ID'] = 'Bank_' + hub2_bank_df.index.astype(str)
+        else:
+            hub2_bank_df = hub2_bank_df.rename(columns={id_col: 'ID'})
+
+        # Convert dates
+        hub2_bank_df['Date'] = pd.to_datetime(hub2_bank_df['createdAtDate'], errors='coerce')
+        hub2_bank_df = hub2_bank_df.dropna(subset=['Date']).copy()
+
+        # Prepare bank recon dataframe
+        hub2_bank_df_recon = hub2_bank_df.rename(columns={
+            'amount': 'Amount',
+            'reference': 'Description'
+        }).copy()
+
+        hub2_bank_df_recon = hub2_bank_df_recon[['Date', 'Amount', 'Description', 'ID']]
+        hub2_bank_df_recon['Date_Match'] = hub2_bank_df_recon['Date'].dt.date
+        hub2_bank_df_recon['Amount_Rounded'] = hub2_bank_df_recon['Amount'].round(2)
+
+        if hub2_bank_df_recon.empty:
+            st.warning("No valid bank records found after filtering for deposits and positive amounts.")
+            return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+        # --- 4. Calculate Total Amounts and Discrepancy (before reconciliation) ---
+        total_internal_credits = hub2_hex_df_recon['Amount'].sum()
+        total_bank_credits = hub2_bank_df_recon['Amount'].sum()
+        discrepancy_amount = total_internal_credits - total_bank_credits
+
+        # --- 5. Reconciliation (Exact Match) ---
+        reconciled_df = pd.merge(
+            hub2_hex_df_recon.assign(Source_Internal='Internal'),
+            hub2_bank_df_recon.assign(Source_Bank='Bank'),
+            on=['Date_Match', 'Amount_Rounded'],
+            how='outer',
+            suffixes=('_Internal', '_Bank')
+        )
+
+        # Identify matched transactions
+        matched_exact = reconciled_df.dropna(subset=['Source_Internal', 'Source_Bank']).copy()
+        if not matched_exact.empty:
+            cols_to_select = [col for col in [
+                'Date_Internal', 'Amount_Internal', 'ID_Internal',
+                'Date_Bank', 'Amount_Bank', 'ID_Bank', 'Amount_Rounded'
+            ] if col in matched_exact.columns]
+            matched_transactions = matched_exact[cols_to_select].copy()
+
+        # Prepare initially unmatched records for tolerance matching
+        unmatched_internal_initial = reconciled_df[reconciled_df['Source_Bank'].isna()].copy()
+        if not unmatched_internal_initial.empty:
+            unmatched_internal_initial = unmatched_internal_initial[['Date_Internal', 'Amount_Internal', 'ID_Internal', 'Amount_Rounded']].rename(columns={
+                'Date_Internal': 'Date', 'Amount_Internal': 'Amount', 'ID_Internal': 'ID'
+            }).copy()
+            unmatched_internal_initial['Date'] = pd.to_datetime(unmatched_internal_initial['Date'])
+        else:
+            unmatched_internal_initial = create_empty_unmatched_df()
+            unmatched_internal_initial['Date'] = pd.to_datetime(unmatched_internal_initial['Date'])
+
+        unmatched_bank_initial = reconciled_df[reconciled_df['Source_Internal'].isna()].copy()
+        if not unmatched_bank_initial.empty:
+            unmatched_bank_initial = unmatched_bank_initial[['Date_Bank', 'Amount_Bank', 'ID_Bank', 'Amount_Rounded']].rename(columns={
+                'Date_Bank': 'Date', 'Amount_Bank': 'Amount', 'ID_Bank': 'ID'
+            }).copy()
+            unmatched_bank_initial['Date'] = pd.to_datetime(unmatched_bank_initial['Date'])
+        else:
+            unmatched_bank_initial = create_empty_unmatched_df()
+            unmatched_bank_initial['Date'] = pd.to_datetime(unmatched_bank_initial['Date'])
+
+        # --- 6. Reconciliation with Date Tolerance (3 days) ---
+        matched_with_tolerance, final_unmatched_internal, final_unmatched_bank = perform_date_tolerance_matching(
+            unmatched_internal_initial, unmatched_bank_initial, tolerance_days=3
+        )
+
+        # Combine all matched records
+        matched_total = pd.concat([matched_transactions, matched_with_tolerance], ignore_index=True)
+
+        # --- 7. Summary of Reconciliation ---
+        total_matched_amount_internal = matched_total['Amount_Internal'].sum() if 'Amount_Internal' in matched_total.columns else 0
+        total_matched_amount_bank = matched_total['Amount_Bank'].sum() if 'Amount_Bank' in matched_total.columns else 0
+        remaining_unmatched_internal_amount = final_unmatched_internal['Amount'].sum() if 'Amount' in final_unmatched_internal.columns else 0
+        remaining_unmatched_bank_amount = final_unmatched_bank['Amount'].sum() if 'Amount' in final_unmatched_bank.columns else 0
+
+        summary = {
+            "Provider name": "Hub2 XOF",
+            "Currency": extracted_currency,
+            "Month & Year": datetime.datetime.now().strftime("%m/%Y"),
+            "# of Transactions": len(matched_total),
+            "Partner Statement": total_bank_credits,
+            "Treasury Records": total_internal_credits,
+            "Variance": discrepancy_amount,
+            "% accuracy": f"{(total_bank_credits / total_internal_credits * 100):.2f}%" if total_internal_credits != 0 else "N/A",
+            "Status": "Matched" if abs(discrepancy_amount) < 0.01 else "Unmatched",
+            "Timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "Comments": "",
+            "Bank Records Filter": "type=deposit, amount>0"
+        }
+
+    except Exception as e:
+        st.error(f"Error during Hub2 XOF reconciliation processing: {str(e)}")
+        return matched_transactions, unmatched_internal, unmatched_bank, summary
+
+    return matched_total, final_unmatched_internal, final_unmatched_bank, summary
+
 def reconcile_i_and_m_rwf(internal_file_obj, bank_file_obj):
     """
     Performs reconciliation for I&M Bank Rwanda (RWF).
