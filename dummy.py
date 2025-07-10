@@ -97,6 +97,7 @@ def highlight_duplicates(df):
     """Highlight duplicate amounts in a DataFrame."""
     duplicates = df.duplicated(['Amount'], keep=False)
     return df.style.apply(lambda x: ['background: yellow' if duplicates[i] else '' for i in range(len(df))])
+
 # --- Helper Functions for File Reading ---
 def create_empty_matched_df():
     """Creates an empty matched DataFrame with standard columns"""
@@ -208,8 +209,8 @@ def perform_date_tolerance_matching(unmatched_internal_df, unmatched_bank_df, to
     # Step 2: Prioritize and select unique matches (THIS IS THE CRITICAL PART)
     # Sort by date difference (ascending) to prefer closer dates, then by amount (desc) for stability
     all_potential_matches_sorted = all_potential_matches.sort_values(
-        by=['date_diff', 'Amount_Rounded'], ascending=[True, False]
-    ).copy()
+        by=['date_diff', 'Amount_Rounded'], ascending=[True, False] 
+        ).copy()
 
     # Drop duplicates to get unique matches:
     # First, keep the first match for each internal ID
@@ -282,7 +283,6 @@ def validate_summary_data(summary_dict):
     return validated
 
 # --- Reconciliation Logic Functions ---
-
 def reconcile_equity_ke(internal_file_obj, bank_file_obj):
     """
     Performs reconciliation for Equity KE.
@@ -6699,15 +6699,50 @@ RECONCILIATION_FUNCTIONS = {
 }
 
 # Manually map specific functions that don't follow the direct naming convention
+# KE
+RECONCILIATION_FUNCTIONS["Equity KE"] = reconcile_equity_ke
+RECONCILIATION_FUNCTIONS["Cellulant KE"] = reconcile_cellulant_ke
+RECONCILIATION_FUNCTIONS["Zamupay PYCS"] = reconcile_zamupay
+RECONCILIATION_FUNCTIONS["Pesaswap"] = reconcile_pesaswap
+RECONCILIATION_FUNCTIONS["Mpesa KE"] = reconcile_mpesa_ke
+RECONCILIATION_FUNCTIONS["I&M KES"] = reconcile_i_and_m_kes
+RECONCILIATION_FUNCTIONS["I&M USD Sending"] = reconcile_i_and_m_usd_ke_sending
+RECONCILIATION_FUNCTIONS["I&M USD Receiving"] = reconcile_i_and_m_usd_ke_receiving
+RECONCILIATION_FUNCTIONS["NCBA KES"] = reconcile_ncba_kes
+RECONCILIATION_FUNCTIONS["NCBA USD"] = reconcile_ncba_usd
+
+# TZ
+RECONCILIATION_FUNCTIONS["Selcom TZ"] = reconcile_selcom_tz
+RECONCILIATION_FUNCTIONS["NMB"] = reconcile_nmb
+RECONCILIATION_FUNCTIONS["Equity TZ"] = reconcile_equity_tz
+RECONCILIATION_FUNCTIONS["Cellulant TZ"] = reconcile_cellulant_tz
+RECONCILIATION_FUNCTIONS["Mpesa TZ"] = reconcile_mpesa_tz
+RECONCILIATION_FUNCTIONS["I&M TZS"] = reconcile_i_and_m_tzs
+#RECONCILIATION_FUNCTIONS["CRDB TZS"] = reconcile_crdb_tzs
+#RECONCILIATION_FUNCTIONS["CRDB USD"] = reconcile_crdb_usd
+#RECONCILIATION_FUNCTIONS["UBA"] = reconcile_uba
+#RECONCILIATION_FUNCTIONS["I&M USD (TZ)"] = reconcile_i_and_m_usd_tz
+
+#UG
+RECONCILIATION_FUNCTIONS["Flutterwave Ug"] = reconcile_flutterwave_ug
+#RECONCILIATION_FUNCTIONS["Pegasus"] = reconcile_pegasus
+#RECONCILIATION_FUNCTIONS["Equity UGX"] = reconcile_equity_ugx
+#RECONCILIATION_FUNCTIONS["Equity Ug USD"] = reconcile_equity_ug_usd
+
+#Ghana
+RECONCILIATION_FUNCTIONS["Flutterwave GHS"] = reconcile_flutterwave_ghs
+RECONCILIATION_FUNCTIONS["Zeepay"] = reconcile_zeepay
+RECONCILIATION_FUNCTIONS["Fincra GHS"] = reconcile_fincra_ghs
+
 #SEN
 RECONCILIATION_FUNCTIONS["Aza Finance XOF"] = reconcile_aza_xof
 RECONCILIATION_FUNCTIONS["Hub2 IC"] = reconcile_hub2_ic_xof
 #RECONCILIATION_FUNCTIONS["Hub2 SEN"] = reconcile_hub2_sen
 
 #RWF
-#RECONCILIATION_FUNCTIONS["Flutterwave RWF"] = reconcile_flutterwave_rwf
-#RECONCILIATION_FUNCTIONS["Kremit"] = reconcile_kremit
 RECONCILIATION_FUNCTIONS["I&M RWF"] = reconcile_i_and_m_rwf
+RECONCILIATION_FUNCTIONS["Flutterwave RWF"] = reconcile_flutterwave_rwf
+RECONCILIATION_FUNCTIONS["Kremit"] = reconcile_kremit
 #RECONCILIATION_FUNCTIONS["I&M USD (RWF)"] = reconcile_i_and_m_usd_rwf
 
 #CAM
@@ -6717,8 +6752,12 @@ RECONCILIATION_FUNCTIONS["I&M RWF"] = reconcile_i_and_m_rwf
 #RECONCILIATION_FUNCTIONS["Pawapay"] = reconcile_pawapay
 
 # NGN
+RECONCILIATION_FUNCTIONS["Fincra NGN"] = reconcile_fincra_ngn
 RECONCILIATION_FUNCTIONS["Flutterwave NGN"] = reconcile_flutterwave_ngn
 RECONCILIATION_FUNCTIONS["Moniepoint"] = reconcile_moniepoint
+RECONCILIATION_FUNCTIONS["Verto"] = reconcile_verto
+RECONCILIATION_FUNCTIONS["Cellulant NGN"] = reconcile_cellulant_ngn
+RECONCILIATION_FUNCTIONS["Zenith"] = reconcile_zenith
 
 # --- Streamlit UI Page Functions ---
 def homepage():
@@ -6949,7 +6988,7 @@ def reconciliation_page():
                 )
                 
                 # Results Tabs
-                tab1, tab2, tab3 = st.tabs(["Unmatched Internal", "Unmatched Bank", "Matched"])
+                tab1, tab2, tab3, tab4 = st.tabs(["Unmatched Internal", "Unmatched Bank", "Matched", "Summary & Download"])
                 
                 with tab1:
                     if unmatched_int.empty:
@@ -6968,7 +7007,49 @@ def reconciliation_page():
                         st.info("No matches found")
                     else:
                         st.dataframe(matched)
-                
+
+                with tab4:
+                    # Display summary in a more readable format
+                    # Calculate date range from internal records
+                    date_range_start = matched['Date_Internal'].min()
+                    date_range_end = matched['Date_Internal'].max()
+        
+                    # Create a clean summary dictionary without technical fields
+                    clean_summary = {
+                        "Provider": summary.get("Provider name", st.session_state.selected_bank),
+                        "Currency": summary.get("Currency", "N/A"),
+                        "Dates Reconciled": f"{date_range_start} to {date_range_end}",
+                        "Total Transactions": summary.get("# of Transactions", summary.get("Total Matched Transactions (All Stages)", 0)),
+                        "Partner Statement": summary.get("Partner Statement", summary.get("Total Bank Credits (Original)", 0)),
+                        "Treasury Records": summary.get("Treasury Records", summary.get("Total Internal Credits (Original)", 0)),
+                        "Variance": summary.get("Variance", summary.get("Overall Discrepancy (Original)", 0)),
+                        "Accuracy": summary.get("% accuracy", 
+                            f"{(summary.get('Total Bank Credits (Original)', 0) / summary.get('Total Internal Credits (Original)', 1)) * 100:.2f}%"
+                            if summary.get('Total Internal Credits (Original)', 0) > 0 
+                            else "0%"),
+                        "Status": "Matched" if abs(summary.get("Variance", summary.get("Overall Discrepancy (Original)", 1))) < 0.01 else "Unmatched"
+                    }
+                    
+                    # Display the clean summary
+                    summary_df = pd.DataFrame.from_dict(clean_summary, orient='index', columns=['Value'])
+                    st.dataframe(summary_df)
+                    
+                    # Convert clean summary to DataFrame for CSV export
+                    report_df = pd.DataFrame([clean_summary])
+                    
+                    # Add the comments to the report
+                    report_df['Comments'] = st.session_state.reconciliation_comments
+                    
+                    # Create CSV download button
+                    csv = report_df.to_csv(index=False).encode('utf-8')
+                    st.download_button(
+                        label="Download Summary",
+                        data=csv,
+                        file_name=f"{st.session_state.selected_bank}_recon_summary_{datetime.datetime.now().strftime('%Y%m%d')}.csv",
+                        mime="text/csv",
+                        key=f"download_{st.session_state.selected_bank}"
+                    )
+
             except Exception as e:
                 feedback_placeholder.error(f"Error during reconciliation: {str(e)}")
                 st.error("Please check your input files and try again.")
