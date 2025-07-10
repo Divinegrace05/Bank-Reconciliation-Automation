@@ -6728,7 +6728,7 @@ def homepage():
     st.write("Select a country to see its providers, then click on a partner to begin reconciliation.")
     st.divider()
     
-    st.subheader("Country:")
+    st.subheader("Country")
     # Horizontal Radio Buttons for Country Selection
     selected_country = st.radio("Select to see banking partners:",
         options=list(COUNTRIES_BANKS.keys()),
