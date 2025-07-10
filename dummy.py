@@ -6824,7 +6824,7 @@ def reconciliation_page():
                 if not duplicates.empty:
                     st.warning("⚠️ Duplicate(s) found in internal records:")
                     st.dataframe(duplicates)
-                    st.write("Please review these transactions and delete one of them in zazu before proceeding with reconciliation.")
+                    st.write("Please review these transactions and delete duplicate(s) in zazu before proceeding with reconciliation.")
                 else:
                     st.write("No duplicates found, proceed with reconciliation.")
         except Exception as e:
