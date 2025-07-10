@@ -4086,9 +4086,10 @@ def reconcile_flutterwave_ghs(internal_file_obj, bank_file_obj):
             st.error(f"Bank statement is missing essential columns: {', '.join(missing_cols)}.")
             return matched_transactions, unmatched_internal, unmatched_bank, summary
 
-        # Filter for credit transactions (type='C') and positive amounts
+        # Filter for credit transactions (type='C'), positive amounts and exclude reversals
         flutterwave_bank_df = flutterwave_bank_df[
             (flutterwave_bank_df['type'].astype(str).str.upper() == 'C') &
+            (~flutterwave_bank_df['remarks'].astype(str).str.contains('rvsl', case=False, na=False)) &
             (pd.to_numeric(flutterwave_bank_df['amount'], errors='coerce') > 0)
         ].copy()
 
