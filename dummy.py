@@ -7037,9 +7037,6 @@ def reconciliation_page():
                     # Convert clean summary to DataFrame for CSV export
                     report_df = pd.DataFrame([clean_summary])
                     
-                    # Add the comments to the report
-                    report_df['Comments'] = st.session_state.reconciliation_comments
-                    
                     # Create CSV download button
                     csv = report_df.to_csv(index=False).encode('utf-8')
                     st.download_button(
