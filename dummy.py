@@ -4224,14 +4224,7 @@ def reconcile_aza_xof(internal_file_obj, bank_file_obj, sheet_name=None):
             return matched_transactions, unmatched_internal, unmatched_bank, summary
 
         # --- 2. Load bank statement ---
-        bank_file_obj.seek(0)  # Reset file pointer
-        
-        # Use specified sheet if provided, otherwise read first sheet
-        if sheet_name:
-            aza_bank_df = pd.read_excel(bank_file_obj, sheet_name=sheet_name, header=0)
-        else:
-            # Default behavior if no sheet specified
-            aza_bank_df = pd.read_excel(bank_file_obj, header=0)
+        aza_bank_df = read_uploaded_file(bank_file_obj, header=0)
         
         # --- 3. Preprocessing for internal records ---
         aza_hex_df.columns = aza_hex_df.columns.astype(str).str.strip()
@@ -4393,7 +4386,6 @@ def reconcile_aza_xof(internal_file_obj, bank_file_obj, sheet_name=None):
             "Timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "Comments": "",
             "% accuracy": f"{(total_bank_credits / total_internal_credits * 100):.2f}%" if total_internal_credits != 0 else "N/A",
-            "Selected Sheet": sheet_name if sheet_name else "Default Sheet",
             "Bank Records Filter": "Transaction Type=CREDIT, Input Currency=XOF, Credits>0"
         }
 
@@ -6868,32 +6860,6 @@ def reconciliation_page():
                     st.write("No duplicates found, proceed with reconciliation.")
         except Exception as e:
             st.warning(f"Could not check for duplicates: {str(e)}")
-
-    # Sheet selection for AZA Finance banks
-    selected_sheet = None
-    if st.session_state.selected_bank in ["Aza Finance XOF", "Aza Finance XAF"] and bank_file is not None:
-        try:
-            bank_file.seek(0)
-            xl = pd.ExcelFile(bank_file)
-            sheet_names = xl.sheet_names
-            if len(sheet_names) > 1:
-                # Initialize selected_sheet in session state if not present
-                if 'selected_sheet' not in st.session_state or st.session_state.selected_sheet not in sheet_names:
-                    st.session_state.selected_sheet = sheet_names[0]
-                
-                selected_sheet = st.selectbox(
-                    "Select the sheet to reconcile from the bank statement:",
-                    sheet_names,
-                    index=sheet_names.index(st.session_state.selected_sheet),
-                    key="aza_sheet_selector"
-                )
-                # Update the session state when selection changes
-                st.session_state.selected_sheet = selected_sheet
-            else:
-                selected_sheet = sheet_names[0] if sheet_names else None
-                st.session_state.selected_sheet = selected_sheet
-        except Exception as e:
-            st.warning(f"Could not read sheet names from bank file: {str(e)}")
 
     # Run reconciliation automatically if Pesaswap file is unlocked or manually via button
     run_reconciliation = st.button("Run Reconciliation", type="primary")
